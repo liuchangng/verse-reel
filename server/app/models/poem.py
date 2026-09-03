@@ -18,6 +18,9 @@ class Poem(Base):
     content = Column(Text, comment="内容（简体）")
     content_traditional = Column(Text, comment="内容（繁体）")
     rhyme = Column(String(20), comment="韵部")
-    
+
+    # hotspot v2.1 P1: 同题组诗逻辑归组
+    group_id = Column(Integer, nullable=True, index=True, comment="组诗归组 ID；None 表示未归组或独立作品。同 (author, title) 的多条记录共享同一 group_id。")
+
     def __repr__(self):
         return f"<Poem(id={self.id}, title='{self.title}', author='{self.author}')>"

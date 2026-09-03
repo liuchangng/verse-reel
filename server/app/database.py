@@ -49,7 +49,7 @@ async def init_db():
         # poet 为诗人名望实体表（由 scripts/build_poets_etl.py 幂等重建，服务端只读）；
         # 必须在此导入，否则新环境部署时 create_all 不会建 poets 表。
         from app.models import (  # noqa: F401
-            poem, task, script, poem_term, hotspot, job, system_setting, poet,
+            poem, task, script, poem_term, poem_tag, hotspot, job, system_setting, poet,
         )
         await conn.run_sync(Base.metadata.create_all)
     # 旧生产库的已存在表不会因 create_all 自动加列，这里自愈式补齐，
