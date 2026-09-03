@@ -222,3 +222,41 @@ class TestStoryboardBudget:
         assert storyboard_budget_block(None) == storyboard_budget_block("S")
         assert storyboard_budget_block("X") == storyboard_budget_block("S")
         assert storyboard_user_prompt("x", "X") == storyboard_user_prompt("x", "S")
+
+
+class TestDurationTierWarning:
+    """W5：成片时长校验（仅告警不截断，对齐 design 2026-09-03 §六 改动点 5）。"""
+
+    def _warn(self, total, tier="S", platform="douyin"):
+        from app.services.pipeline import PipelineEngine
+        return PipelineEngine._duration_tier_warning(total, tier, platform)
+
+    def test_s_in_window_no_warning(self):
+        assert self._warn(30.0, "S") is None
+        assert self._warn(25.0, "S") is None
+        assert self._warn(40.0, "S") is None
+        # 含 2s 末镜定格的典型值
+        assert self._warn(40.0 + 2.0, "S") is not None  # 42 > 40 目标窗 → 高窗告警
+
+    def test_s_below_min(self):
+        m = self._warn(20.0, "S")
+        assert m and "低于" in m and "下限" in m
+
+    def test_s_over_window_and_hard_cap(self):
+        assert "超出" in self._warn(45.0, "S")          # 45 在 40–50 之间 → 目标窗告警
+        m = self._warn(55.0, "S")
+        assert m and "硬上限" in m                        # 55 > 50 → 硬上限告警（优先）
+        assert "硬上限" in self._warn(60.0, "S")
+
+    def test_l_windows(self):
+        assert self._warn(100.0, "L") is None
+        assert "低于" in self._warn(80.0, "L")
+        assert "超出" in self._warn(160.0, "L")          # L 无硬上限 → 目标窗告警
+
+    def test_platform_label_in_message(self):
+        m = self._warn(20.0, "S", "xiaohongshu")
+        assert "xiaohongshu" in m
+
+    def test_unknown_tier_defaults_s(self):
+        assert self._warn(30.0, "X") is None
+        assert self._warn(30.0, None) is None

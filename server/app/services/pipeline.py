@@ -1617,6 +1617,27 @@ class PipelineEngine:
         return bool(_re.search(r"[「『“‘][^」』”’]{2,40}[」』”’]", text))
 
     @staticmethod
+    def _duration_tier_warning(total: float, tier: str | None = None,
+                               platform: str | None = None) -> str | None:
+        """成片时长 vs 档位窗口校验（video-comm 文案改造轮 W5）：超窗/超硬上限仅告警，不自动截断。
+
+        截断会剪掉收尾定格与互动留白，属内容层问题——由文案/评审修复后重跑更安全。
+        优先级：硬上限 > 低于下限 > 高于目标窗。窗口来自 config.TIER_PROFILES（单一事实源）。
+        """
+        prof = tier_profile(tier)
+        lo, hi = prof["dur_min"], prof["dur_max"]
+        hard = prof.get("dur_hard_max")
+        who = f"（平台 {platform}）" if platform else ""
+        if hard is not None and total > hard:
+            return (f"成片 {total:.1f}s 超过 {prof['label']}档硬上限 {hard}s{who}"
+                    f"——超长伤完播，建议人工复核文案/分镜后重跑")
+        if total < lo:
+            return f"成片 {total:.1f}s 低于 {prof['label']}档目标下限 {lo}s{who}——过短可能信息不足"
+        if total > hi:
+            return f"成片 {total:.1f}s 超出 {prof['label']}档目标窗 {lo}–{hi}s{who}——偏长需留意完播"
+        return None
+
+    @staticmethod
     def _split_poem_full_lines(content: str) -> list[str]:
         """把原诗全文切成"整句"候选（供金句池原诗整句匹配，video-comm 决策 5 升级）。
 
@@ -1799,6 +1820,11 @@ class PipelineEngine:
             base_fwd = str(base).replace("\\", "/")
             bgm = self._select_bgm(task.style)
             out_total = total + (hold if hold > 0 else 0.0)
+            # video-comm 文案改造轮 W5：成片时长 vs 平台所属档位窗口校验
+            # （超窗/超硬上限仅告警日志，不自动截断——截断会剪掉收尾定格与互动留白）。
+            _warn = self._duration_tier_warning(out_total, tier_of(platform), platform)
+            if _warn:
+                logger.warning(f"task{task.id} 时长校验({platform}, {out_total:.1f}s): {_warn}")
             if bgm:
                 bgm_fwd = str(bgm).replace("\\", "/")
                 if hold > 0:
