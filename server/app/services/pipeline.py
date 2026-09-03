@@ -24,7 +24,7 @@ from app.services.hotspot import hotspot_service
 from app.services.prompt_optimizer import prompt_optimizer
 from app.services.character import character_service
 from app.services.publisher import publisher_service
-from app.config import settings
+from app.config import settings, tier_of
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +80,15 @@ def _extract_video_url(result: dict) -> str:
 #   16:9 → B站/YouTube（共享一份 base）
 #   3:4  → 小红书（独立）
 # 故 5 个平台仅需要 ≤3 种分辨率渲染。
+# duration_tier: 平台所属档位（S 快档/L 深档，见 config.TIER_PROFILES），
+#   单一事实源在 config.PLATFORM_TIER——文案/分镜档位化（W2-W4）与成片
+#   时长校验（W5）据此决定用哪套预算，消除 §一 口径脱节（假默认 30）。
 PLATFORM_CONFIG = {
-    "douyin": {"aspect_ratio": "9:16", "size": "720P", "label": "抖音"},
-    "xiaohongshu": {"aspect_ratio": "3:4", "size": "720P", "label": "小红书"},
-    "kuaishou": {"aspect_ratio": "9:16", "size": "720P", "label": "快手"},
-    "bilibili": {"aspect_ratio": "16:9", "size": "720P", "label": "B站"},
-    "youtube": {"aspect_ratio": "16:9", "size": "720P", "label": "YouTube"},
+    "douyin": {"aspect_ratio": "9:16", "size": "720P", "label": "抖音", "duration_tier": tier_of("douyin")},
+    "xiaohongshu": {"aspect_ratio": "3:4", "size": "720P", "label": "小红书", "duration_tier": tier_of("xiaohongshu")},
+    "kuaishou": {"aspect_ratio": "9:16", "size": "720P", "label": "快手", "duration_tier": tier_of("kuaishou")},
+    "bilibili": {"aspect_ratio": "16:9", "size": "720P", "label": "B站", "duration_tier": tier_of("bilibili")},
+    "youtube": {"aspect_ratio": "16:9", "size": "720P", "label": "YouTube", "duration_tier": tier_of("youtube")},
 }
 
 # 视频宽高映射（agnes-video-v2.0 要求 width/height，按平台比例推导）

@@ -11,6 +11,48 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "server" / "data"
 
 
+# ====== 档位档案（video-comm 设计文档 §三「时长档位化」，决策 1 定稿）======
+# 单一事实源：文案字数 / 镜头数 / 成片时长窗口 + 平台→档位映射。
+# 本轮默认产出 = S 快档 × douyin/kuaishou/xiaohongshu（用户 2026-09-03 拍板）；
+# L 深档 + bilibili/youtube 为后续扩展——档案先行落地（文案改造轮 W1），
+# 供 critic 提示词档位化（W2-W4）与成片时长校验（W5）统一引用，杜绝散落魔数。
+TIER_PROFILES: dict[str, dict] = {
+    "S": {
+        "label": "快档",
+        "chars_min": 80, "chars_max": 130,   # 解说文案字数预算（script 与 Σnarration 双口径）
+        "shots_min": 6, "shots_max": 9,       # 分镜镜头预算
+        "dur_min": 25, "dur_max": 40,         # 成片目标时长窗（秒）
+        "dur_hard_max": 50,                   # 硬上限（超窗仅告警不自动截断，见 W5）
+        "shot_sec_min": 3, "shot_sec_max": 7, # 单镜时长参考
+    },
+    "L": {
+        "label": "深档",
+        "chars_min": 300, "chars_max": 450,
+        "shots_min": 14, "shots_max": 22,
+        "dur_min": 90, "dur_max": 150,
+        "dur_hard_max": None,                 # L 无硬上限（扩展期再定）
+        "shot_sec_min": 5, "shot_sec_max": 10,
+    },
+}
+
+# 平台 → 档位映射（PLATFORM_CONFIG 无档位维度；未知平台兜底 S，
+# 与 PLATFORM_CONFIG.get(platform, douyin) 的兜底口径一致）
+PLATFORM_TIER: dict[str, str] = {
+    "douyin": "S", "kuaishou": "S", "xiaohongshu": "S",
+    "bilibili": "L", "youtube": "L",
+}
+
+
+def tier_of(platform: str | None) -> str:
+    """平台 → 档位；未知/空平台回退 S（与 PLATFORM_CONFIG 兜底 douyin 一致）。"""
+    return PLATFORM_TIER.get((platform or "").lower(), "S")
+
+
+def tier_profile(tier: str | None) -> dict:
+    """档位档案；未知/空档位回退 S。"""
+    return TIER_PROFILES.get((tier or "").upper(), TIER_PROFILES["S"])
+
+
 class Settings(BaseSettings):
     """应用配置"""
     
