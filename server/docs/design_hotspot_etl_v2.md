@@ -191,8 +191,8 @@ score = hits * 1.0 + tag_hits * 1.5 + golden_hits * 3.0 + fame_bonus
 | P0 | 候选池兜底名望 Top50（C 已完成） | 已完成 | ✅ | 无 |
 | P1 | `poem_tags` 表 + 规则打标签脚本 | 1-2天 | 🔴 高 | 标签体系需反复调整 |
 | P1 | `poems.content_hash` 去重 + 散篇合并 | 0.5天 | 🟡 中 | 影响面大，需备份 |
-| P2 | `poems.golden_lines` + 金句规则 | 0.5天 | 🟡 中 | 金句需人工标注 |
-| P2 | `_rule_candidates` 标签召回 + 加权排序 | 1天 | 🟡 中 | 需回归测试 |
+| P2 | `poems.golden_lines` + 金句规则 | 0.5天 | ✅ 完成（64 条 curate，weighted in `_rule_candidates`） |
+| P2 | `_rule_candidates` golden 加权接入 | 1天 | ✅ 完成（score = hits + golden_hits*3） |
 | P3 | AI 小模型补充 style 标签 | 1-2天 | 🟢 低 | 依赖本地小模型 |
 
 **建议**：先推进 P1（poem_tags），这是语义召回的核心，也是用户"金句/核心点"诉求的直接落地。
@@ -260,7 +260,7 @@ score = hits * 1.0 + tag_hits * 1.5 + golden_hits * 3.0 + fame_bonus
 | P0 | A(停用词+主题映射)+C(名望兜底) | 已实现（hotspot.py 未提交） | ✅ |
 | **P1** | **组诗归并为"作品单元"**（group_id / 物理解；86.9 万行→单元级，附 §2.2 巨型组单列处理） | §8.1 主矛盾 | 🔴 |
 | **P1** | **季节/节令标签**（确定性词表全量打标 poem_tags） | §8.3 | 🔴 |
-| **P2** | **金句库注入 position='g'** + golden 加权 | §8.3 | 🟡 |
+| **P2** | **金句库注入 position='g'** + golden 加权 ✅（commit cd8d00a, 64 条 curated + `_rule_candidates` 评分公式 `hits + golden_hits*3` 落地） | §8.3 | ✅ |
 | **P2** | 主题先验词表（爱国/忠君/忧国忧民等）打标 + 标签/金句召回改造 `_rule_candidates` | §8.3/8.4 | 🟡 |
 | P3 | 精选层语义向量召回（可选，需决策 §8.6） | §8.2 | 🟢 |
 | P4 | content_hash 完全重复去重（原 §4.3，降级） | §2.2 仅 1241 组 | ⚪ |

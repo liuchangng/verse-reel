@@ -500,26 +500,49 @@ class HotspotService:
     ) -> list[int]:
         """规则初筛：倒排表 term IN (...) 精确匹配，聚合 poem_id 得分取 Top-N。
 
-        返回候选诗词 id 列表（按命中 term 数降序）。
+        评分公式：score = hits*1.0 + golden_hits*3.0
+        - hits: 普通倒排词命中数（position 不区分）
+        - golden_hits: position='g' 金句命中数（设计权重 3x）
         #20260903: limit 默认 200（原 20），让多样性策略有机会覆盖古代正宗 /
         明清优秀等 bucket（旧 20 候选全集中在同一朝代/作者桶里）。
+        #20260903-P2: 接入 golden 加权，使金句库注入生效。
         #20260903-C: 兜底混合名望 Top50 代表作，防止"检索词没命中"导致名诗漏出。
         """
         if not db or not keywords:
             return []
 
-        # --- 主路：倒排表召回 ---
+        kw_list = list(keywords)
+
+        # --- 主路：倒排表召回（含 golden 加权） ---
         stmt = (
-            select(PoemTerm.poem_id, func.count().label("hits"))
-            .where(PoemTerm.term.in_(keywords))
+            select(
+                PoemTerm.poem_id,
+                func.count().label("hits"),
+                func.sum(
+                    case((PoemTerm.position == "g", 1), else_=0)
+                ).label("golden_hits"),
+            )
+            .where(PoemTerm.term.in_(kw_list))
             .group_by(PoemTerm.poem_id)
-            .order_by(func.count().desc())
+            .order_by(
+                (func.count() + func.sum(
+                    case((PoemTerm.position == "g", 1), else_=0)
+                ) * 3).desc()
+            )
             .limit(limit)
         )
         primary_ids: list[int] = []
         try:
             result = await db.execute(stmt)
-            primary_ids = [row[0] for row in result.fetchall()]
+            rows = result.fetchall()
+            primary_ids = [row[0] for row in rows]
+            # 记录评分明细供日志
+            scored = [(row[0], row[1] + row[2] * 3, row[1], row[2]) for row in rows]
+            top5 = scored[:5]
+            logger.info(
+                f"_rule_candidates 倒排召回 {len(primary_ids)} 首，"
+                f"top5 评分明细: {[(pid, round(sc,1), h, gh) for pid,sc,h,gh in top5]}"
+            )
         except Exception as e:
             logger.warning(f"倒排表初筛失败: {e}")
 
