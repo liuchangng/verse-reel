@@ -77,7 +77,7 @@ class TestPipelinePendingReview:
             result = await db.execute(select(Task).where(Task.id == task.id))
             saved = result.scalar_one()
             assert saved.status == "pending_review"
-            assert saved.current_stage == "review"
+            assert saved.current_stage == "subtitle"  # 保持最后执行阶段，不回退到 review
             assert saved.progress == 95
             assert saved.review_status == "pending"
 
