@@ -24,6 +24,8 @@ TIER_PROFILES: dict[str, dict] = {
         "dur_min": 25, "dur_max": 40,         # 成片目标时长窗（秒）
         "dur_hard_max": 50,                   # 硬上限（超窗仅告警不自动截断，见 W5）
         "shot_sec_min": 3, "shot_sec_max": 7, # 单镜时长参考
+        "nar_max": 20,                        # 单镜 narration 字数上限（Σnarration=字数预算同口径，
+                                              #   S: 130 字/6 镜≈22 → 取 20 逼文案均匀铺到每镜）
     },
     "L": {
         "label": "深档",
@@ -32,6 +34,7 @@ TIER_PROFILES: dict[str, dict] = {
         "dur_min": 90, "dur_max": 150,
         "dur_hard_max": None,                 # L 无硬上限（扩展期再定）
         "shot_sec_min": 5, "shot_sec_max": 10,
+        "nar_max": 30,                        # L: 450 字/14 镜≈32 → 取 30（L 扩展预案）
     },
 }
 

@@ -169,3 +169,56 @@ class TestTaskTierResolve:
         assert resolve_task_tier(None) == "L"
         monkeypatch.setattr(settings, "output_platforms", [])
         assert resolve_task_tier(None) == "S"  # 空配置兜底 douyin → S
+
+
+class TestStoryboardBudget:
+    """W4：分镜提示词档位化在位守卫（对齐 design 2026-09-03 §五 分镜层规则）。"""
+
+    def test_s_budget_numbers_injected_from_profile(self):
+        from app.services.critic import storyboard_budget_block
+        blk = storyboard_budget_block("S")
+        p = TIER_PROFILES["S"]
+        assert f"整片 {p['dur_min']}–{p['dur_max']} 秒" in blk
+        assert f"分镜 {p['shots_min']}–{p['shots_max']} 镜" in blk
+        assert f"{p['shot_sec_min']}–{p['shot_sec_max']} 秒" in blk
+        assert f"{p['chars_min']}–{p['chars_max']} 字" in blk
+        assert f"≤{p['nar_max']} 字" in blk
+
+    def test_s_five_beat_arc_and_rates_present(self):
+        from app.services.critic import storyboard_budget_block
+        blk = storyboard_budget_block("S")
+        for kw in ("五拍弧线", "钩子镜", "人设/背景镜", "意境蓄力镜", "金句镜", "收尾定格镜",
+                   "30–50%", "次末镜"):
+            assert kw in blk, f"S 分镜预算缺 {kw}"
+
+    def test_l_budget_and_arc_present(self):
+        from app.services.critic import storyboard_budget_block
+        blk = storyboard_budget_block("L")
+        p = TIER_PROFILES["L"]
+        assert f"整片 {p['dur_min']}–{p['dur_max']} 秒" in blk
+        assert f"分镜 {p['shots_min']}–{p['shots_max']} 镜" in blk
+        assert "五拍弧线" in blk and "金句镜" in blk
+        assert "≥50%" in blk
+
+    def test_narration_cap_in_full_prompt_matches_profile(self):
+        from app.services.critic import storyboard_user_prompt
+        for t in ("S", "L"):
+            prompt = storyboard_user_prompt("文案示例。", t)
+            m = re.search(r"narration ≤\s*(\d+)\s*字", prompt)
+            assert m is not None, f"{t} prompt 缺 narration 上限"
+            assert int(m.group(1)) == TIER_PROFILES[t]["nar_max"]
+
+    def test_legacy_fixed_shot_budget_retired(self):
+        from app.services.critic import storyboard_user_prompt
+        prompt = storyboard_user_prompt("文案示例。", "S")
+        # 旧 prompt 把镜头数写死"每5秒一镜/≥20 镜/20-24"；现按档注入。
+        # 注意：S 预算段含"禁止再按每5秒一镜均分"红线句，故只断言旧的口径短语全退役。
+        for legacy in ("每5秒一个分镜", "每5秒一个分镜，总时长约2分钟",
+                       "不少于20个分镜", "建议 20-24 个", "总时长约2分钟"):
+            assert legacy not in prompt, f"S 分镜 prompt 残留旧写死预算: {legacy}"
+
+    def test_unknown_tier_defaults_s(self):
+        from app.services.critic import storyboard_budget_block, storyboard_user_prompt
+        assert storyboard_budget_block(None) == storyboard_budget_block("S")
+        assert storyboard_budget_block("X") == storyboard_budget_block("S")
+        assert storyboard_user_prompt("x", "X") == storyboard_user_prompt("x", "S")

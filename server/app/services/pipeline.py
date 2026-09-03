@@ -24,7 +24,7 @@ from app.services.hotspot import hotspot_service
 from app.services.prompt_optimizer import prompt_optimizer
 from app.services.character import character_service
 from app.services.publisher import publisher_service
-from app.config import settings, tier_of, resolve_task_tier, tier_script_guidelines
+from app.config import settings, tier_of, resolve_task_tier, tier_script_guidelines, tier_profile
 
 logger = logging.getLogger(__name__)
 
@@ -469,12 +469,13 @@ class PipelineEngine:
                 await db.commit()
                 return
             
-            # 阶段2: 生成分镜
+            # 阶段2: 生成分镜（文案/分镜链统一按任务平台解析的档位走）
             task.current_stage = "storyboard"
             task.progress = 30
             await db.commit()
-            
-            storyboard = await self._generate_storyboard(script_text)
+
+            sb_tier = resolve_task_tier(self._task_platforms(task))
+            storyboard = await self._generate_storyboard(script_text, tier=sb_tier)
             task.storyboard = json.dumps(storyboard, ensure_ascii=False)
             await db.commit()
             
@@ -686,10 +687,14 @@ class PipelineEngine:
         # 所有重试都失败
         return script_text, score_result
     
-    async def _generate_storyboard(self, script: str) -> list[dict]:
-        """生成分镜（每镜含 narration 纯中文旁白）"""
+    async def _generate_storyboard(self, script: str, tier: str = "S") -> list[dict]:
+        """生成分镜（每镜含 narration 纯中文旁白）。
+
+        video-comm 文案改造轮 W4：tier 由任务平台解析传入 critic 分镜 prompt
+        （镜头预算/镜长窗/narration 上限/五拍弧线/出镜率按档注入）。
+        """
         
-        storyboard_json = await critic_service.generate_storyboard(script)
+        storyboard_json = await critic_service.generate_storyboard(script, tier=tier)
         
         try:
             if "```json" in storyboard_json:
@@ -704,14 +709,23 @@ class PipelineEngine:
                     it["narration"] = it.get("description", "")
             return data
         except json.JSONDecodeError:
-            # 返回默认分镜（含 narration 兜底）
-            return [
-                {"time": "0-5s", "description": "开场画面", "camera": "固定镜头", "narration": "开场画面"},
-                {"time": "5-10s", "description": "主体画面", "camera": "缓慢推进", "narration": "主体画面"},
-                {"time": "10-15s", "description": "细节特写", "camera": "特写", "narration": "细节特写"},
-                {"time": "15-20s", "description": "情感高潮", "camera": "环绕", "narration": "情感高潮"},
-                {"time": "20-25s", "description": "结尾画面", "camera": "拉远", "narration": "结尾画面"},
-            ]
+            # 返回档位化默认分镜（S 7 镜 ≈ 6–9 中值 / L 18 镜 ≈ 14–22 中值，镜长按档）
+            prof = tier_profile(tier)
+            n = max(1, (prof["shots_min"] + prof["shots_max"]) // 2)
+            span = (prof["dur_min"] + prof["dur_max"]) / 2.0
+            step = span / n
+            defaults = []
+            t0 = 0.0
+            for i in range(n):
+                defaults.append({
+                    "time": f"{int(t0)}-{int(t0 + step)}s",
+                    "description": f"场景 {i + 1}",
+                    "camera": "缓慢推进",
+                    "has_character": (i % 2 == 0),
+                    "narration": f"这是本片的第{i + 1}个画面。",
+                })
+                t0 += step
+            return defaults
     
     async def _generate_images(
         self,

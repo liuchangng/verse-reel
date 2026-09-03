@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 
 from app.services.agnes import agnes_client
-from app.config import settings, tier_script_guidelines
+from app.config import settings, TIER_PROFILES, tier_script_guidelines
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,62 @@ IMAGE_CRITIC_SYSTEM_PROMPT = """你是一位专业的视觉内容审核编辑，
 }"""
 
 
+# ====== 分镜提示词档位化（video-comm 设计文档 §五「分镜层规则」，文案改造轮 W4）======
+# storyboard_user_prompt 输出的分镜 prompt 承载档位预算（镜头数/镜长/旁白字数/五拍弧线/
+# 主角出镜率），数字由 config.TIER_PROFILES 注入（单一事实源）；质量铁律（图内无字/构图
+# 安全区/画面净度/角色一致性）跨档共用。未知/空档位回退 S。
+def storyboard_budget_block(tier: str | None = None) -> str:
+    """档位预算段：镜头预算 + 镜长窗 + 旁白字数双口径 + 五拍弧线落点 + 主角出镜率。"""
+    t = (tier or "").upper()
+    p = TIER_PROFILES.get(t, TIER_PROFILES["S"])
+    if t == "L":
+        return f"""【本轮档位预算】L 深档 · 整片 {p['dur_min']}–{p['dur_max']} 秒，分镜 {p['shots_min']}–{p['shots_max']} 镜，镜长按信息点 {p['shot_sec_min']}–{p['shot_sec_max']} 秒（禁止按固定 5s 均分）；全片旁白合计 {p['chars_min']}–{p['chars_max']} 字（与文案字数同口径，逐字配音）。
+【五拍弧线 · L 落点】钩子镜 = 第1镜（0–3s）→ 人设/背景镜 = 第2–4镜 → 意境蓄力镜 = 中段铺 2–3 镜（空镜留白，BGM 情绪带）→ 金句镜 = 全片约 2/3 处（构图最强一镜）→ 收尾定格镜 = 末镜（旁白结束补 1.5–2s 定格）。
+【主角出镜率】L 档 ≥50% 镜有主角（人设叙事向）。"""
+    return f"""【本轮档位预算】S 快档 · 整片 {p['dur_min']}–{p['dur_max']} 秒（硬上限 {p['dur_hard_max']} 秒），分镜 {p['shots_min']}–{p['shots_max']} 镜，镜长按信息点 {p['shot_sec_min']}–{p['shot_sec_max']} 秒（可 3/4/5/6/7s，禁止再按"每5秒一镜"均分）；全片旁白合计 {p['chars_min']}–{p['chars_max']} 字（与文案字数同口径，逐字配音）→ 每镜 narration ≤{p['nar_max']} 字。
+【五拍弧线 · S 落点】（按此布局 {p['shots_min']}–{p['shots_max']} 镜；镜数不足时合并第②③拍，钩子/金句/收尾三拍不许吞）：
+ ① 钩子镜 = 第 1 镜（0–3s：近景人物动势或意象特写，情绪入场）
+ ② 人设/背景镜 = 第 2–3 镜（交代诗人处境，中景转全景）
+ ③ 意境蓄力镜 = 中段 1–2 镜（空镜留白：山水大远景/微距自然物，慢速运镜）
+ ④ 金句镜 = 次末镜（全片构图最强一镜：大留白 + 人物剪影或山河全景）
+ ⑤ 收尾定格镜 = 末镜（拉远/定格，旁白结束后补 1.5–2 秒定格，画面静默）
+【主角出镜率】S 档允许意境空镜：has_character=true 约占 30–50%（不必多数出镜）。"""
+
+
+def storyboard_user_prompt(script: str, tier: str | None = None) -> str:
+    """构建分镜 user prompt（tier 档位预算段注入 + 跨档质量铁律）。"""
+    t = (tier or "").upper()
+    p = TIER_PROFILES.get(t, TIER_PROFILES["S"])
+    budget = storyboard_budget_block(t)
+    return f"""请根据以下古诗词解说文案，生成用于 AI 生图 + 视频的分镜画面提示词。
+
+文案：
+{script}
+
+要求：
+{budget}
+- 写实古风风格，服装、发型、器物、建筑须严格符合文案对应的朝代（唐/宋等）
+- 每个分镜包含：时间段(time)、画面描述(description)、镜头运动(camera)、是否出现主角(has_character)、旁白文本(narration)
+- 运镜情绪词典：开阔/释怀 → 缓推或拉远；悲怆/沉重 → 下摇或缓慢横移；金句 → 推近特写后停顿；禁止连续两镜同机位且无景别级差（相邻镜至少升/降 1 级：远景-中景-近景不重复）
+- narration 是该镜对应的纯中文口语化旁白（一句话解说诗意/背景/情感），将逐字被配音朗读，必须：
+    · 纯中文，禁止出现任何英文单词或英文品牌词（如 Agnes、BGM、KPI、AI、Remix 等一律不得出现）
+    · 禁止括号、禁止【】等制作备注，只写要念出来的话
+    · 与该镜画面内容严格对应，前后镜衔接成连贯解说
+    · 每镜 narration ≤ {p['nar_max']} 字（全片旁白合计 = 文案字数，见档位预算）
+- 角色一致性（最关键）：全片只有一个固定的主角人物，其外貌/服饰/气质必须跨所有分镜保持完全一致：
+    · 主角出镜率按档位预算（见上）；凡出镜镜，禁止更换主角年龄、服饰款式、服饰颜色或长相
+    · 画面描述里写明主角当镜的衣着与神态，确保前后统一（参考已生成的角色定妆照）
+- 【严禁图内文字】description 不得要求"画面里出现文字/金句/字幕/书法字/黑白文底/水印字/手写体"。理由：①AI 生图写中文必然出乱码/伪字（它不理解字形，只"画"出类字噪点）形成视觉噪音；②文字画在边缘会被多画幅裁剪切掉（9:16/3:4/16:9 切换时右上/右下/上沿被切）；③文字统一由后期 SRT 字幕烧录 + drawtext 水印解决，绝不需要在图内出现。任何"黑底白字""金句弹出""字幕定格""手写体""印刷体""calligraphy""chinese characters written""text overlay""caption card"等字眼一律改写为 narration 旁白描述，让配音念出，而非让图内出现。
+- 【构图安全区】description 必须满足：①主体（人物/关键物体）位于画面中央 60%；②四边各留 ≥8% 安全空白（防止多画幅裁剪时被切）；③使用「留白」「空镜头」「微距特写」「淡入淡出」的镜头语言时，禁止把主体推到边缘 20% 区域。
+- 【画面净度】description 内显式包含"画面干净""无噪点""高清""电影感""层次清晰"等质地关键词，避免"暗调压抑满屏"导致的颗粒感重。
+
+输出JSON数组格式：
+[
+    {{"time": "0-4s", "description": "画面描述（含主角衣着神态）", "camera": "镜头运动", "has_character": true, "narration": "纯中文旁白，例如：秋风卷起江边的落叶，杜甫独自登高，望向远方的山河"}},
+    ...
+]"""
+
+
 class CriticService:
     """苛刻编辑打分器"""
     
@@ -224,45 +280,20 @@ class CriticService:
         response = await agnes_client.generate_text(messages, max_tokens=1000)
         return parse_score_json(response, settings.script_score_threshold)
     
-    async def generate_storyboard(self, script: str) -> str:
+    async def generate_storyboard(self, script: str, tier: str = "S") -> str:
         """
-        生成分镜提示词
-        
+        生成分镜提示词（video-comm 文案改造轮 W4：按档位注入镜头/时长/旁白预算）
+
         Args:
             script: 文案内容
-            
+            tier: 产出档位（S/L；S 快档 6–9 镜·镜长 3–7s·narration≤20 字，
+                  L 深档 14–22 镜·5–10s，见 config.TIER_PROFILES）
+
         Returns:
             分镜提示词列表（JSON格式）
         """
-        user_prompt = f"""请根据以下古诗词解说文案，生成用于 AI 生图 + 视频的分镜画面提示词。
-
-文案：
-{script}
-
-        要求：
-        - 每5秒一个分镜，总时长约2分钟，因此不少于20个分镜（建议 20-24 个）
-        - 写实古风风格，服装、发型、器物、建筑须严格符合文案对应的朝代（唐/宋等）
-        - 每个分镜包含：时间段(time)、画面描述(description)、镜头运动(camera)、是否出现主角(has_character)、旁白文本(narration)
-        - narration 是该镜对应的纯中文口语化旁白（一句话解说诗意/背景/情感），将逐字被配音朗读，必须：
-            · 纯中文，禁止出现任何英文单词或英文品牌词（如 Agnes、BGM、KPI、AI、Remix 等一律不得出现）
-            · 禁止括号、禁止【】等制作备注，只写要念出来的话
-            · 与该镜画面内容严格对应，前后镜衔接成连贯解说
-        - 角色一致性（最关键）：全片只有一个固定的主角人物，其外貌/服饰/气质必须跨所有分镜保持完全一致：
-            · 主角须频繁出镜——多数分镜 has_character=true，仅空镜/纯意境镜头才 has_character=false
-            · 禁止在任何分镜里更换主角的年龄、服饰款式、服饰颜色或长相
-            · 画面描述里写明主角当镜的衣着与神态，确保前后统一（参考已生成的角色定妆照）
-        - 【严禁图内文字】description 不得要求"画面里出现文字/金句/字幕/书法字/黑白文底/水印字/手写体"。理由：①AI 生图写中文必然出乱码/伪字（它不理解字形，只"画"出类字噪点）形成视觉噪音；②文字画在边缘会被多画幅裁剪切掉（9:16/3:4/16:9 切换时右上/右下/上沿被切）；③文字统一由后期 SRT 字幕烧录 + drawtext 水印解决，绝不需要在图内出现。任何"黑底白字""金句弹出""字幕定格""手写体""印刷体""calligraphy""chinese characters written""text overlay""caption card"等字眼一律改写为 narration 旁白描述，让配音念出，而非让图内出现。
-        - 【构图安全区】description 必须满足：①主体（人物/关键物体）位于画面中央 60%；②四边各留 ≥8% 安全空白（防止多画幅裁剪时被切）；③使用「留白」「空镜头」「微距特写」「淡入淡出」的镜头语言时，禁止把主体推到边缘 20% 区域。
-        - 【画面净度】description 内显式包含"画面干净""无噪点""高清""电影感""层次清晰"等质地关键词，避免"暗调压抑满屏"导致的颗粒感重。
-
-        输出JSON数组格式：
-        [
-            {{"time": "0-5s", "description": "画面描述（含主角衣着神态）", "camera": "镜头运动", "has_character": true, "narration": "纯中文旁白，例如：秋风卷起江边的落叶，杜甫独自登高，望向远方的山河"}},
-            ...
-        ]"""
-        
         messages = [
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": storyboard_user_prompt(script, tier)},
         ]
         
         return await agnes_client.generate_text(messages, max_tokens=3000)
