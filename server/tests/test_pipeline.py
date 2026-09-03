@@ -45,12 +45,12 @@ class TestPipelinePendingReview:
         async def fake_storyboard(*a, **k):
             return [{"time": "0-5s", "description": "画面"}]
         async def fake_chars(*a, **k):
-            return None
+            return {"ref": "http://char/1.jpg", "description": "李白，唐代诗人"}
         async def fake_images(*a, **k):
             return ["http://img/1.jpg"]
         async def fake_video(*a, **k):
             return "http://video/1.mp4"
-        async def fake_tts(*a, **k):
+        async def fake_tts_segments(*a, **k):
             return {"success": True, "audio_url": "http://audio/1.mp3", "duration_ms": 15000}
         async def fake_subtitle(*a, **k):
             return "http://video/1.mp4"
@@ -61,7 +61,7 @@ class TestPipelinePendingReview:
         monkeypatch.setattr("app.services.character.character_service.generate_character_reference", fake_chars)
         monkeypatch.setattr(pipeline_engine, "_generate_images", fake_images)
         monkeypatch.setattr(pipeline_engine, "_generate_video", fake_video)
-        monkeypatch.setattr(pipeline_engine, "_generate_tts", fake_tts)
+        monkeypatch.setattr(pipeline_engine, "_generate_tts_segments", fake_tts_segments)
         monkeypatch.setattr(pipeline_engine, "_burn_subtitles", fake_subtitle)
 
         async with Session() as db:
