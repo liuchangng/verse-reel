@@ -176,3 +176,54 @@ class TestSubtitleGoldenAndHold:
         c = pipeline_engine._split_timeline(tl, chars_per_line=20, max_lines=2,
                                             golden_lines=["不存在的金句"], golden_weight=1.0)
         assert a == b == c
+
+
+class TestGoldenPoemUpgrade:
+    """video-comm 决策 5 升级（文案改造轮 W3）：金句池并入「原诗整句」。
+
+    S 三段式文案落地后，白话段旁白常不带引号原样念出原诗整句——旧启发
+    （仅 script 引号内句子）会漏掉；poem_content 传入时原诗行直接入池，
+    使无引号的"原诗整句 cue"同样获得加权停留。
+    """
+
+    def test_poem_lines_merged_into_pool(self):
+        from app.services.pipeline import PipelineEngine
+        script = "这句诗，写的是不是此刻的你。"
+        poem = "床前明月光，疑是地上霜。\n举头望明月，低头思故乡。"
+        out = PipelineEngine._extract_golden_from_script(script, poem_content=poem)
+        for line in ("床前明月光", "疑是地上霜", "举头望明月", "低头思故乡"):
+            assert line in out, f"原诗整句未入池: {line}"
+        assert out == sorted(set(out), key=out.index)  # 无重复
+
+    def test_quote_lines_and_poem_lines_dedup(self):
+        from app.services.pipeline import PipelineEngine
+        # 同一句既在 script 引号内、又是原诗行 → 只入池一次
+        script = "李白写道：「举头望明月」"
+        poem = "举头望明月，低头思故乡。"
+        out = PipelineEngine._extract_golden_from_script(script, poem_content=poem)
+        assert out.count("举头望明月") == 1
+        assert "低头思故乡" in out
+
+    def test_short_noise_excluded(self):
+        from app.services.pipeline import PipelineEngine
+        poem = "风。\n月。\n惊涛拍岸，卷起千堆雪。"
+        out = PipelineEngine._extract_golden_from_script("", poem_content=poem)
+        assert "风" not in out and "月" not in out   # <4 字噪音
+        assert "惊涛拍岸" in out and "卷起千堆雪" in out  # 长行按标点细切
+
+    def test_poem_none_keeps_legacy_quote_only(self):
+        from app.services.pipeline import PipelineEngine
+        script = "他说「天生我材必有用」，千金散尽还复来。"
+        out = PipelineEngine._extract_golden_from_script(script)  # 不传 poem
+        assert out == ["天生我材必有用"]
+        assert PipelineEngine._extract_golden_from_script("", None) == []
+
+    def test_unquoted_poem_cue_now_hits_golden(self):
+        """白话段 cue 不带引号念出原诗整句 → 原诗池使其命中（升级核心收益）"""
+        from app.services.pipeline import PipelineEngine
+        cue = "举头望明月，低头思故乡。"
+        # 旧行为：无引号 → 不命中
+        assert not PipelineEngine._is_golden_cue(cue, None)
+        # 新行为：原诗整句在池中 → 命中（len>=4）
+        pool = PipelineEngine._extract_golden_from_script("", poem_content="举头望明月，低头思故乡。")
+        assert PipelineEngine._is_golden_cue(cue, pool)

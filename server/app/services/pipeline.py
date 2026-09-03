@@ -24,7 +24,7 @@ from app.services.hotspot import hotspot_service
 from app.services.prompt_optimizer import prompt_optimizer
 from app.services.character import character_service
 from app.services.publisher import publisher_service
-from app.config import settings, tier_of
+from app.config import settings, tier_of, resolve_task_tier, tier_script_guidelines
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +404,8 @@ class PipelineEngine:
                 raise RuntimeError("视频片段合成失败")
             # 3) 烧字幕 + BGM → final.mp4（彻底弃用 agnes 5s 片段音轨）
             subtitle_url = await self._burn_subtitles(task, segs["base"], storyboard, segs, W, H,
-                                                     platform=task.platform or "douyin")
+                                                     platform=task.platform or "douyin",
+                                                     poem_content=poem.content if poem else None)
             if subtitle_url:
                 task.subtitle_url = subtitle_url
                 # 展示视频同样指向完整成片（覆盖 agnes 5s 片段）
@@ -536,14 +537,9 @@ class PipelineEngine:
             task.progress = 90
             await db.commit()
 
-            # 本任务选中的平台优先；未指定则回退全局 settings.output_platforms（系统设置页配置）
-            task_platforms = []
-            if task.platforms:
-                try:
-                    task_platforms = json.loads(task.platforms) or []
-                except (TypeError, ValueError):
-                    task_platforms = []
-            platforms = task_platforms or getattr(settings, 'output_platforms', None) or ["douyin"]
+            # 本任务选中的平台优先；未指定则回退全局 settings.output_platforms（系统设置页配置）。
+            # 与文案链 _generate_script 共用 _task_platforms 解析（口径一致）。
+            platforms = self._task_platforms(task)
             platform_urls = {}
             # 按画幅比例分组：同比例平台只构建一次 base 视频，仅各自烧录 final_{plat}.mp4。
             # 例：抖音/快手(9:16) 共享一份 base，B站/YouTube(16:9) 共享一份 base，
@@ -564,7 +560,7 @@ class PipelineEngine:
                 for plat in plats:
                     final_url = await self._burn_subtitles(
                         task, segs["base"], storyboard, segs, W, H,
-                        platform=plat
+                        platform=plat, poem_content=poem.content,
                     )
                     if final_url:
                         platform_urls[plat] = final_url
@@ -598,6 +594,22 @@ class PipelineEngine:
             await db.commit()
             raise
     
+    @staticmethod
+    def _task_platforms(task: Task) -> list[str]:
+        """本任务显式发布平台（task.platforms JSON）；为空回退 settings.output_platforms。
+
+        与渲染段共用同一解析（video-comm 决策 1：文案链按任务平台解析档位）。
+        """
+        raw = getattr(task, "platforms", None)
+        if raw:
+            try:
+                plats = json.loads(raw) or []
+                if plats:
+                    return plats
+            except (TypeError, ValueError):
+                pass
+        return list(getattr(settings, "output_platforms", None) or ["douyin"])
+
     async def _generate_script(
         self,
         db: AsyncSession,
@@ -612,11 +624,20 @@ class PipelineEngine:
         Returns:
             (文案文本, 评分结果)
         """
+        # video-comm 文案改造轮（W3）：档位段前置注入。tier 由任务平台解析
+        # （本轮默认产出 douyin/kuaishou/xiaohongshu → S 快档三段式 80–130 字；
+        # L 五段预案已随 config.TIER_SCRIPT_STRUCTURE 就位，扩展时自动生效）。
+        task_plats = self._task_platforms(task)
+        tier = resolve_task_tier(task_plats)
+        logger.info(f"task{task.id} 文案档位解析: tier={tier} (platforms={task_plats})")
+
         for attempt in range(settings.max_retries):
-            logger.info(f"生成文案 (尝试 {attempt + 1}/{settings.max_retries}, 风格: {style})")
+            logger.info(f"生成文案 (尝试 {attempt + 1}/{settings.max_retries}, 风格: {style}, 档位: {tier})")
             
-            # 获取风格化的提示词
-            creator_prompt = prompt_optimizer.get_creator_prompt(style)
+            # 组装完整 system prompt = 档位段（硬约束前置，结构/字数/时长/金句句界）
+            # + 风格段（prompt_optimizer 风格语气模板）
+            style_prompt = prompt_optimizer.get_creator_prompt(style)
+            creator_prompt = f"{tier_script_guidelines(tier)}\n\n【语气风格】\n{style_prompt}"
             
             # 生成文案
             script_text = await critic_service.generate_script(
@@ -1582,21 +1603,51 @@ class PipelineEngine:
         return bool(_re.search(r"[「『“‘][^」』”’]{2,40}[」』”’]", text))
 
     @staticmethod
-    def _extract_golden_from_script(script: str) -> list:
-        """从文案脚本中抽取「引号内句子」作为金句候选集（供字幕加权停留）。
+    def _split_poem_full_lines(content: str) -> list[str]:
+        """把原诗全文切成"整句"候选（供金句池原诗整句匹配，video-comm 决策 5 升级）。
 
-        critic 文案（尤其快档三段式"金句钩子 0-3s"）会用引号标出原诗金句整句；
-        此处抽出即得金句池。无引号/无脚本时返回空表，字幕层退化为"cue 自带引号"启发。
+        按换行分句 → 每行一律按标点（，。；！？、等）细切成子句 → 去首尾标点/引号。
+        只保留 4–40 字片段（<4 防噪音；>40 过长无法被子幕 cue 整句命中，丢弃）。
+        子句粒度入池 + _is_golden_cue 的子串命中 → 无论旁白是念单句
+        （"床前明月光"）还是整联（"举头望明月，低头思故乡"）都能命中。
+        例："床前明月光，疑是地上霜。\n举头望明月，低头思故乡。"
+        → [床前明月光, 疑是地上霜, 举头望明月, 低头思故乡]
         """
-        if not script:
+        if not content:
             return []
         import re as _re
-        found = _re.findall(r"[「『“‘]([^」』”’]{2,40})[」』”’]", script)
-        out = []
-        for g in found:
-            g = g.strip()
-            if len(g) >= 4 and g not in out:
-                out.append(g)
+        out: list[str] = []
+        for raw in _re.split(r"[\n\r]+", content):
+            line = raw.strip()
+            if not line:
+                continue
+            for seg in _re.split(r"[，。；！？、,.!?;:]", line):
+                seg = seg.strip().strip("… \t“”‘’\"'「」『』（）()·")
+                if 4 <= len(seg) <= 40 and seg not in out:
+                    out.append(seg)
+        return out
+
+    @staticmethod
+    def _extract_golden_from_script(script: str, poem_content: str | None = None) -> list:
+        """金句候选池抽取（video-comm 决策 5）：
+
+        ① 文案脚本(task.script)中「引号内句子」——S 三段式 prompt 强制金句以原诗整句
+          形态 + 「」标注出现（critic 档位段【金句句界】），此处抽出即得池主体；
+        ② poem_content 传入时并入【原诗整句】池——白话段旁白常原样念出原诗整句
+          （不带引号），字幕 cue 仅凭"自带引号"启发会漏掉 → 原诗池使其同样获加权停留。
+        无引号/无脚本/无原诗时返回空表，字幕层退化为"cue 自带引号"启发（旧行为）。
+        """
+        out: list[str] = []
+        if script:
+            import re as _re
+            for g in _re.findall(r"[「『“‘]([^」』”’]{2,40})[」』”’]", script):
+                g = g.strip()
+                if len(g) >= 4 and g not in out:
+                    out.append(g)
+        if poem_content:
+            for line in PipelineEngine._split_poem_full_lines(poem_content):
+                if line not in out:
+                    out.append(line)
         return out
 
     def _write_segmented_srt(self, timeline, path: Path):
@@ -1645,6 +1696,7 @@ class PipelineEngine:
         self, task: Task, base_path: str, storyboard: list[dict], segs: dict,
         W: int = 1080, H: int = 1350,
         platform: str = "douyin",
+        poem_content: str | None = None,
     ) -> str:
         """烧录分段字幕 + 混入场景 BGM，产出 final_{platform}.mp4（多平台）或 final.mp4。
 
@@ -1676,9 +1728,11 @@ class PipelineEngine:
             ar = self._aspect_key(W, H)
             cpl = int((getattr(settings, 'subtitle_chars_per_line', None) or {}).get(ar, 12))
             max_lines = int(getattr(settings, 'subtitle_max_lines', 2)) or 2
-            # video-comm 决策 5：金句候选集 = 文案脚本(task.script)中引号包裹句子；
+            # video-comm 决策 5：金句候选集 = 文案脚本(task.script)中引号包裹句子 +
+            # 原诗整句（poem_content 传入时并入——白话段旁白不带引号念出原诗也命中）；
             # 命中金句的 cue 在 _split_timeline 按 golden_subtitle_weight 放大停留。
-            golden_lines = self._extract_golden_from_script(getattr(task, "script", "") or "")
+            golden_lines = self._extract_golden_from_script(
+                getattr(task, "script", "") or "", poem_content)
             gweight = float(getattr(settings, "golden_subtitle_weight", 1.4) or 0.0)
             # video-comm 决策 5：末镜静音定格秒数（0=关闭，命令与旧版完全一致）
             hold = float(getattr(settings, "end_hold_duration", 2.0) or 0.0)

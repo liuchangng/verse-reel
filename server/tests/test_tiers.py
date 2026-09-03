@@ -1,15 +1,21 @@
-"""video-comm 文案改造轮 W1/W2 单测：档位档案 + S 快档评审卡在位守卫。
+"""video-comm 文案改造轮 W1/W2/W3 单测：档位档案 + S 快档评审卡 + 档位文案模板在位守卫。
 
 覆盖（纯离线，无 LLM/网络/ffmpeg 依赖）：
 - W1 tier 档案：TIER_PROFILES 窗口与设计文档 §三 一致、PLATFORM_TIER 映射、
   tier_of/tier_profile 兜底、PLATFORM_CONFIG 每平台 duration_tier 与档案一致。
 - W2 评审卡：S 档单套卡在位（新六维键 + 收藏动机 + 字数软扣分规则 + 旧错位键退役）。
+- W3 文案档位化：tier_script_guidelines 结构模板与数字注入（对齐 §四 三段式 + TIER_PROFILES）、
+  resolve_task_tier 任务级档位解析（含混合收敛 S）、CREATOR_SYSTEM_PROMPT 默认=S 档防回退。
 """
 import pytest
+import re
 
-from app.config import TIER_PROFILES, PLATFORM_TIER, tier_of, tier_profile
+from app.config import (
+    TIER_PROFILES, PLATFORM_TIER, tier_of, tier_profile,
+    tier_script_guidelines, resolve_task_tier, settings,
+)
 from app.services.pipeline import PLATFORM_CONFIG
-from app.services.critic import CRITIC_SYSTEM_PROMPT
+from app.services.critic import CRITIC_SYSTEM_PROMPT, CREATOR_SYSTEM_PROMPT
 
 
 class TestTierProfiles:
@@ -85,3 +91,81 @@ class TestCriticCardS:
     def test_no_hello_style_hook_gate(self):
         # S 档钩子铁律：禁"大家好/今天讲"式铺垫
         assert "大家好" in CRITIC_SYSTEM_PROMPT
+
+
+class TestTierScriptGuidelines:
+    """W3：档位文案结构模板在位守卫（对齐 design 2026-09-03 §四 三段式 / 五段式）。"""
+
+    def test_s_three_act_structure_present(self):
+        t = tier_script_guidelines("S")
+        for kw in ("三段式", "金句钩子", "白话直给", "现代对齐", "金句句界", "收尾"):
+            assert kw in t, f"S 档模板缺 {kw}"
+
+    def test_s_chars_injected_from_profile(self):
+        # 文本内字数区间由 TIER_PROFILES 注入（数字单一事实源防漂移）
+        m = re.search(r"(\d+)–(\d+) 字", tier_script_guidelines("S"))
+        assert m is not None
+        assert (int(m.group(1)), int(m.group(2))) == (
+            TIER_PROFILES["S"]["chars_min"], TIER_PROFILES["S"]["chars_max"])
+
+    def test_s_no_legacy_five_act_leftover(self):
+        # 旧文案 prompt（五段式 + 300–400 字/2 分钟）在 S 档必须绝迹
+        t = tier_script_guidelines("S")
+        for legacy in ("痛点钩子", "人设重塑", "电影级细节", "灵魂对齐", "情绪出口",
+                       "300-400", "300–400", "2分钟"):
+            assert legacy not in t, f"S 档模板残留旧结构: {legacy}"
+
+    def test_s_golden_line_boundary_rule(self):
+        # 金句句界铁律：原诗整句 + 「」标注 + 禁改写冒充
+        t = tier_script_guidelines("S")
+        assert "「」" in t or "「" in t
+        assert "整句" in t and "原文" in t
+
+    def test_l_five_act_structure_present(self):
+        t = tier_script_guidelines("L")
+        for kw in ("五段式", "痛点钩子", "人设重塑", "电影级细节", "灵魂对齐", "情绪出口"):
+            assert kw in t, f"L 档模板缺 {kw}"
+        m = re.search(r"(\d+)–(\d+) 字", t)
+        assert m is not None
+        assert (int(m.group(1)), int(m.group(2))) == (
+            TIER_PROFILES["L"]["chars_min"], TIER_PROFILES["L"]["chars_max"])
+
+    def test_unknown_tier_defaults_s(self):
+        assert tier_script_guidelines(None) == tier_script_guidelines("S")
+        assert tier_script_guidelines("X") == tier_script_guidelines("S")
+
+    def test_creator_system_prompt_is_s_default(self):
+        # critic 默认文案 prompt = config tier S 档位段（防回退旧五段式常量）
+        assert CREATOR_SYSTEM_PROMPT == tier_script_guidelines("S")
+        assert "2分钟" not in CREATOR_SYSTEM_PROMPT
+
+
+class TestTaskTierResolve:
+    """W3：任务级档位解析（决策 1 推论：任务创建按平台解析 duration_tier）。"""
+
+    def test_pure_s_platforms(self):
+        assert resolve_task_tier(["douyin"]) == "S"
+        assert resolve_task_tier(["douyin", "kuaishou", "xiaohongshu"]) == "S"
+
+    def test_pure_l_platforms(self):
+        assert resolve_task_tier(["bilibili"]) == "L"
+        assert resolve_task_tier(["bilibili", "youtube"]) == "L"
+
+    def test_mixed_converges_to_s(self):
+        # S+L 混合收敛 S（L 长文案发 S 平台不可接受；S 短文案发 L 平台可接受）
+        assert resolve_task_tier(["douyin", "bilibili"]) == "S"
+        assert resolve_task_tier(["xiaohongshu", "youtube", "kuaishou"]) == "S"
+
+    def test_empty_and_unknown(self):
+        assert resolve_task_tier([]) in ("S", "L")
+        assert resolve_task_tier(["weibo"]) == "S"  # 未知平台兜底 S
+
+    def test_none_falls_back_to_output_platforms(self, monkeypatch):
+        # 空平台 → settings.output_platforms（默认四平台含 bilibili → 混合收敛 S）
+        monkeypatch.setattr(settings, "output_platforms",
+                            ["douyin", "xiaohongshu", "kuaishou", "bilibili"])
+        assert resolve_task_tier(None) == "S"
+        monkeypatch.setattr(settings, "output_platforms", ["bilibili", "youtube"])
+        assert resolve_task_tier(None) == "L"
+        monkeypatch.setattr(settings, "output_platforms", [])
+        assert resolve_task_tier(None) == "S"  # 空配置兜底 douyin → S

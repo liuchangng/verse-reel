@@ -53,6 +53,69 @@ def tier_profile(tier: str | None) -> dict:
     return TIER_PROFILES.get((tier or "").upper(), TIER_PROFILES["S"])
 
 
+# ====== 档位文案结构模板（video-comm 设计文档 §四「文案层规则」，文案改造轮 W3）======
+# tier_script_guidelines(tier) 输出"档位指导段"——文案链 system prompt 中承载
+# 结构模板 / 字数 / 时长 / 金句句界的部分。两个消费方：
+#   · pipeline._generate_script 组装：档位段(前置硬约束) + 风格段(prompt_optimizer 语气)，
+#     合成完整 custom_prompt 传给 critic.generate_script；
+#   · critic.generate_script(custom_prompt=None) 时直接取档位段作默认 system prompt（默认 S）。
+# 文本内 {xxx} 占位符在运行时由 TIER_PROFILES[tier] 注入 → 数字单一事实源不漂移。
+# S 三段式 = 设计文档 §四 快档三段式（金句钩子→白话直给→现代对齐+收尾）；
+# L 五段 = 原 CREATOR_SYSTEM_PROMPT 的五段式（L 深档预案文本化，本轮不产出）。
+TIER_SCRIPT_STRUCTURE: dict[str, str] = {
+    "S": """你是一位拥有千万粉丝、擅长解构历史与文学的短视频金牌文案策划。你的风格类似"深度人生教练"，能把古诗词翻译成现代人的"心理防线"，把诗人写成有血有肉的"身边人"。
+
+【本轮档位】S 快档 · 成片 {dur_min}–{dur_max} 秒（硬上限 {dur_hard_max} 秒），解说全文（不含标题）控制在 {chars_min}–{chars_max} 字，分镜 {shots_min}–{shots_max} 镜（单镜约 {shot_sec_min}–{shot_sec_max} 秒）。口语化、像朋友聊天，禁止书面语腔。
+
+【结构模板 · 三段式】（必须严格执行，全文只这三段）：
+1. 【金句钩子】(片头 0–3 秒即出金句)：把这首诗最有冲击力的一句以【原诗原文完整形态】讲出来——整句引用、不可截断/改写/拼贴，并自然接一句把它点破的话（这句诗，把 XX 写到了骨子里）。禁止"大家好/今天讲/你知道吗"式铺垫，禁止绕弯子。
+2. 【白话直给】(中段主体，约 40–70 字)：金句逐句翻成大白话 + 一句作者处境（谁、在什么境遇里、为什么写下这句）。课本记忆是共同认知基础，点到即止，不逐字解释到枯燥。
+3. 【现代对齐 + 收尾留白】(约 20–30 字)：把诗意接到观众情绪（"这句诗，写的是不是此刻的你"），自然带一句收藏/转发动机；说完即停，末尾留给画面 1.5–2 秒定格、无旁白。
+
+【金句句界】：原诗金句必须以【原文整句】形态出现并用「」标出（如「天生我材必有用」），引号内必须是原诗原文，禁止改写或自己造句后冒充原句；全篇引号出现一处即可，其余金句不用再引。
+
+【红线】：出现"大家好/今天讲/你知道吗"式开场铺垫，或字数明显偏离 {chars_min}–{chars_max} 字区间，直接不合格。""",
+    "L": """你是一位拥有千万粉丝、擅长解构历史与文学的短视频金牌文案策划。你的风格类似"深度人生教练"，能把古诗词翻译成现代人的"心理防线"，把诗人写成有血有肉的"身边人"。
+
+【本轮档位】L 深档 · 成片 {dur_min}–{dur_max} 秒，解说全文控制在 {chars_min}–{chars_max} 字，分镜 {shots_min}–{shots_max} 镜。口语化、有纪录片旁白的质感。
+
+【结构模板 · 五段式】（必须严格执行）：
+1. 【痛点钩子】- 开头3秒抓住观众，提出一个让人共鸣的问题
+2. 【人设重塑】- 打破观众对诗人的刻板印象，展现真实的人
+3. 【电影级细节】- 用具体的时间、地点、事件还原历史场景
+4. 【灵魂对齐】- 把古诗和现代人的情感连接起来
+5. 【情绪出口】- 给观众一个情感释放的出口
+
+要求：每个部分 3–5 句话，语言口语化，结尾要有可截图传播的金句。""",
+}
+
+
+def tier_script_guidelines(tier: str | None = None) -> str:
+    """档位文案指导段：结构模板文本 + TIER_PROFILES 数字注入。
+
+    tier 为空/未知回退 S（默认产出口径）。文案链的档位侧唯一来源——
+    prompt 侧任何"字数/镜头/时长/结构"约束都必须由本函数产出，禁止散落硬编码。
+    """
+    t = (tier or "").upper()
+    if t not in TIER_PROFILES:
+        t = "S"
+    prof = TIER_PROFILES[t]
+    tmpl = TIER_SCRIPT_STRUCTURE.get(t, TIER_SCRIPT_STRUCTURE["S"])
+    return tmpl.format(**prof)
+
+
+def resolve_task_tier(platforms: list[str] | None = None) -> str:
+    """任务级文案档位解析：由本任务显式平台列表解析；为空回退 settings.output_platforms。
+
+    多档混合时收敛到 S——S 档文案发 L 平台（B站等横屏短内容）尚属可接受，
+    L 长文案发 S 平台（抖快红 150 秒竖屏）不可接受 → 含 S 即取 S。
+    未知平台随 tier_of 兜底 S。决策 1 推论"任务创建按平台解析 duration_tier"的落地处。
+    """
+    plats = [p for p in (platforms or []) if p] or getattr(settings, "output_platforms", None) or ["douyin"]
+    tiers = {tier_of(p) for p in plats}
+    return "S" if "S" in tiers else ("L" if "L" in tiers else "S")
+
+
 class Settings(BaseSettings):
     """应用配置"""
     

@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 
 from app.services.agnes import agnes_client
-from app.config import settings
+from app.config import settings, tier_script_guidelines
 
 logger = logging.getLogger(__name__)
 
@@ -79,22 +79,13 @@ class ScoreResult:
         return f"<ScoreResult(score={self.score}, {status})>"
 
 
-# 生成者 System Prompt
-CREATOR_SYSTEM_PROMPT = """你是一位拥有千万粉丝、擅长解构历史与文学的短视频金牌文案策划。
-
-你的风格类似"深度人生教练"，能将古诗词翻译成现代人的"心理防线"，把诗人写成有血有肉的"身边人"。
-
-你的文案结构必须包含：
-1. 【痛点钩子】- 开头3秒抓住观众，提出一个让人共鸣的问题
-2. 【人设重塑】- 打破观众对诗人的刻板印象，展现真实的人
-3. 【电影级细节】- 用具体的时间、地点、事件还原历史场景
-4. 【灵魂对齐】- 把古诗和现代人的情感连接起来
-5. 【情绪出口】- 给观众一个情感释放的出口
-
-要求：
-- 语言要口语化，像朋友聊天
-- 每个部分控制在3-5句话
-- 总时长约2分钟（300-400字）"""
+# 生成者 System Prompt —— 默认 = config.tier_script_guidelines("S")（S 快档三段式 + 80–130 字）。
+# 文案改造轮 W3（video-comm 决策 1 定稿默认产出 S 档）把旧的"五段式 + 300–400 字/2 分钟"
+# 固定文案 prompt 档位化为 config.TIER_SCRIPT_STRUCTURE（数字由 TIER_PROFILES 注入，
+# 单一事实源）：S 三段式 = 设计文档 §四 快档三段式；L 五段式预案留档在 config，本轮不产出。
+# 仅当调用方不传 custom_prompt 时此默认生效；pipeline 生产路径总是传组装后的
+# "档位段 + 风格段" 完整 prompt（见 pipeline._generate_script）。
+CREATOR_SYSTEM_PROMPT: str = tier_script_guidelines("S")
 
 
 # 评判者 System Prompt —— S 快档单套评审卡（video-comm 决策 2 定稿，2026-09-03）
@@ -166,35 +157,41 @@ class CriticService:
         dynasty: str,
         custom_prompt: str | None = None,
         keywords: list[str] | None = None,
+        tier: str = "S",
     ) -> str:
         """
         生成文案脚本
-        
+
         Args:
             poem_title: 诗词标题
             poem_content: 诗词内容
             author: 作者
             dynasty: 朝代
-            
+            custom_prompt: 完整 system prompt（覆盖默认；pipeline 传"档位段+风格段"组装结果）；
+                           为空则取 tier_script_guidelines(tier) 档位默认（默认 S 快档）。
+            keywords: 热点关键词
+            tier: 产出档位（S/L），仅 custom_prompt 为空时生效
+
         Returns:
             生成的文案
         """
-        # 构建用户提示词
-        user_prompt = f"""请为以下古诗词撰写一篇深度短视频脚本：
+        # 构建用户提示词（结构指引由 system prompt 的档位段全权负责，此处不写死五段名，
+        # 否则 S 三段式会与 L 五段式 user 提示冲突）
+        user_prompt = f"""请为以下古诗词撰写一篇短视频解说文案：
 
 【诗词】{poem_title}
 【作者】{author}（{dynasty}）
 【内容】{poem_content}
 
-请按照【痛点钩子】【人设重塑】【电影级细节】【灵魂对齐】【情绪出口】的结构撰写。"""
+严格按照 system 提示词中的档位与结构模板撰写，直接输出文案正文，不要解释、不要 Markdown 标题。"""
         
         # 添加热点关键词（如果有）
         if keywords:
             user_prompt += f"\n\n【热点关键词】{', '.join(keywords[:5])}"
             user_prompt += "\n请将这些热点元素自然融入文案中。"
         
-        # 使用自定义提示词或默认
-        system_prompt = custom_prompt if custom_prompt else CREATOR_SYSTEM_PROMPT
+        # 使用自定义提示词或按档位取默认（S 三段式/L 五段式，文本源 config.TIER_SCRIPT_STRUCTURE）
+        system_prompt = custom_prompt if custom_prompt else tier_script_guidelines(tier)
         
         messages = [
             {"role": "system", "content": system_prompt},
