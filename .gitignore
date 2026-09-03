@@ -1,0 +1,89 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env
+
+# Database
+*.db
+*.sqlite
+*.db-wal
+*.db-shm
+
+# Node
+node_modules/
+dist/
+.npm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# 数据目录内容（保留目录结构）
+data/*
+!data/.gitkeep
+
+# 输出目录
+output/
+
+# 后端虚拟环境 / 模型权重 / 产物（体积大，不纳入版本控制）
+.venv/
+server/.venv/
+server/pretrained_models/
+server/data/
+
+# === spec-superflow-enhanced 生成文件（重装可恢复，不纳入版本控制）===
+/AGENTS.md
+/.agents/
+/plugin.json
+/knowledge.md
+/.githooks/
+/.joycode/
+/.opencode/
+/.hermes/
+/.cursor/
+/.freebuff/
+/.workbuddy/
+/.claude/
+/_output/
+# === end spec-superflow-enhanced ===
+
+# vite 构建临时文件
+client/vite.config.js.timestamp-*.mjs
+
+# === 一次性调试产物（不纳入版本控制）===
+# 单次验证脚本生成的中间文件
+.kaitest/
+_*.html
+
+# 临时调试脚本/中间数据
+server/_*.json
+server/_verify*.py
+server/.openapi_dump.json
+
+# 运行期日志与一次性调试产物（logs/ 下划线文件 + 各类运行时日志不纳入版本控制）
+logs/_*
+logs/*.log
+
+# TTS 旧独立服务的产物（合并到主后端后 outputs 仅作历史保留）
+tts-server/outputs/
+
+# 一次性探测/重现脚本（保留生产脚本 build_terms_index/import_xml*/make_edge_refs/wire_refs/download_cosyvoice_model/gen_ref_voice/fetch_yasong_refs，忽略 test_/verify_/repro_/agnes_probe*）
+server/scripts/agnes_probe*.py
+server/scripts/repro_*.py
+server/scripts/test_*.py
+server/scripts/verify_*.py
+# === end 一次性调试产物 ===

@@ -1,0 +1,320 @@
+"""FastAPI 主应用入口"""
+import asyncio
+import logging
+import os
+import time
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.config import settings
+from app.database import init_db
+from app.services.settings_store import (
+    load_config_from_db,
+    save_config_to_db,
+    reset_config_in_db,
+    apply_overlay,
+    WRITABLE_KEYS,
+)
+from app.services.queue import queue_service
+from app.api import poems, tasks, ws, hotspots, tts
+from app.services import tts_core
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时
+    logger.info("正在启动古诗词视频流水线...")
+    await init_db()
+    logger.info("数据库初始化完成")
+
+    # 加载持久化配置（DB overlay），让重启后保留用户在系统设置页的修改。
+    # 仅对白名单字段生效，非法值会被忽略。
+    overlay = await load_config_from_db()
+    if overlay:
+        apply_overlay(settings, overlay)
+        logger.info("已应用持久化配置：%d 项", len(overlay))
+
+    # 启动生产队列（DB 持久化 + 重启可恢复）。
+    # 必须在 settings overlay 之后启动，这样 queue 的并发信号量读到的是用户值。
+    await queue_service.start()
+    logger.info("生成队列已上线")
+
+    # 预热 CosyVoice2：若配置了参考音频，后台线程加载模型，避免首个 TTS 请求承担
+    # ~14s 加载开销。参考音频未配置则跳过（auto 走 edge-tts）。失败不影响启动。
+    tts_core.prewarm_cosyvoice()
+
+    yield
+    # 关闭时
+    logger.info("正在关闭应用...")
+    await queue_service.stop()
+
+
+# 创建 FastAPI 应用
+app = FastAPI(
+    title="古诗词短视频工厂",
+    description="基于 Agnes AI 的古诗词短视频自动化生产系统",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# 配置 CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 注册路由
+app.include_router(poems.router, prefix="/api/poems", tags=["诗词"])
+app.include_router(tasks.router, prefix="/api/tasks", tags=["任务"])
+app.include_router(hotspots.router, prefix="/api/hotspots", tags=["热点"])
+app.include_router(ws.router, prefix="/ws", tags=["WebSocket"])
+# TTS 已合并进主后端（进程内，默认 edge-tts，CosyVoice2 就绪后 auto 优先）
+app.include_router(tts.router, prefix="/api/tts", tags=["TTS"])
+
+# 静态服务：把本地产物目录（视频/音频/字幕）暴露为 /outputs 供前端直连播放
+# 例如 /outputs/task_1/final.mp4
+os.makedirs(settings.output_dir, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=settings.output_dir), name="outputs")
+
+
+@app.get("/")
+async def root():
+    """根路径"""
+    return {
+        "name": "古诗词短视频工厂",
+        "version": "0.1.0",
+        "status": "running",
+    }
+
+
+@app.get("/health")
+async def health():
+    """健康检查"""
+    return {"status": "healthy"}
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """获取当前配置（已在启动期与 DB 合并）"""
+    return {
+        # 文本模型
+        "text_api_key": settings.text_api_key,
+        "text_base_url": settings.text_base_url,
+        "text_model": settings.text_model,
+        "text_concurrency": settings.text_concurrency,
+        # 图片模型
+        "image_api_key": settings.image_api_key,
+        "image_base_url": settings.image_base_url,
+        "image_model": settings.image_model,
+        "image_concurrency": settings.image_concurrency,
+        # 视频模型
+        "video_api_key": settings.video_api_key,
+        "video_base_url": settings.video_base_url,
+        "video_model": settings.video_model,
+        "video_concurrency": settings.video_concurrency,
+        # 通用
+        "critic_concurrency": settings.critic_concurrency,
+        "script_score_threshold": settings.script_score_threshold,
+        "image_score_threshold": settings.image_score_threshold,
+        "max_retries": settings.max_retries,
+        # TTS / 字幕并发
+        "tts_concurrency": settings.tts_concurrency,
+        "subtitle_concurrency": settings.subtitle_concurrency,
+        # 多平台输出（设置页"发布平台"多选）
+        "output_platforms": settings.output_platforms,
+        # 水印配置（设置页"水印配置"区块）
+        "watermark_enabled": settings.watermark_enabled,
+        "watermark_text": settings.watermark_text,
+        "watermark_fontsize_ratio": settings.watermark_fontsize_ratio,
+        "watermark_colour": settings.watermark_colour,
+        "watermark_alpha": settings.watermark_alpha,
+        "watermark_margin_ratio": settings.watermark_margin_ratio,
+        "watermark_position": settings.watermark_position,
+        # 写库白名单（前端可写哪些字段）
+        "writable_keys": list(WRITABLE_KEYS),
+    }
+
+
+@app.post("/api/settings")
+async def update_settings(data: dict):
+    """更新配置：落库 + 热更新内存中的 Pydantic 实例。
+
+    修复点（vs 旧版）：
+      - 旧版仅 ``setattr`` 内存，重启即丢；现在 ``save_config_to_db`` 会
+        序列化为 JSON 写 ``system_settings`` 表，下次启动由 lifespan 读回。
+      - 同时白名单校验防止非法字段污染实例（WRITABLE_KEYS）。
+    """
+    payload = await save_config_to_db(data)
+    apply_overlay(settings, payload)
+    return {
+        "message": "配置已保存并持久化",
+        "saved_keys": list(payload.keys()),
+        "settings": await get_settings(),
+    }
+
+
+@app.post("/api/settings/reset")
+async def reset_settings_api():
+    """清空持久化配置，恢复 Pydantic 默认值。"""
+    await reset_config_in_db()
+    # 把内存中所有白名单字段恢复为默认值（仅对默认值常量有副本的字段；当前
+    # 在 GET/POST 同步逻辑下，重新加载 = 重新按空 overlay 应用一次即可让
+    # DB 不再覆盖默认）。
+    for key in WRITABLE_KEYS:
+        try:
+            current = getattr(settings, key, None)
+            # 反射回到 Pydantic 的默认值
+            field = settings.__class__.model_fields.get(key)
+            if field is not None:
+                setattr(settings, key, field.default)
+        except Exception:
+            pass
+    return {"message": "已恢复默认值", "settings": await get_settings()}
+
+
+@app.get("/api/queue/status")
+async def queue_status():
+    """生产队列实时状态（手动观察：pending / running / done / failed 任务分桶）。
+
+    用于排查"为什么没在跑"——某阶段是不是一直 pending 看 Task 产物是否齐
+    备（D5 死锁）/ 视频是不是等待 62s 间隔（D6 修复）。
+    """
+    from sqlalchemy import func as sa_func, select as sa_select
+    from app.database import async_session_factory
+    from app.models.job import Job
+
+    async with async_session_factory() as session:
+        rows = await session.execute(
+            sa_select(Job.stage, Job.status, sa_func.count(Job.id)).group_by(Job.stage, Job.status)
+        )
+        bucket: dict[str, dict[str, int]] = {}
+        for stage, status, count in rows.all():
+            bucket.setdefault(stage, {})[status] = count
+    return {
+        "buckets": bucket,
+        "video_min_interval_sec": settings.video_min_interval,
+        "concurrency": {
+            "text": settings.text_concurrency,
+            "image": settings.image_concurrency,
+            "video": settings.video_concurrency,
+            "tts": settings.tts_concurrency,
+            "subtitle": settings.subtitle_concurrency,
+        },
+        "throttle": _throttle_snapshot(),
+    }
+
+
+def _throttle_snapshot() -> dict:
+    """4 个限流器的当前使用快照（D4 节流内核可观测性）。"""
+    from app.services.rate_limiter import (
+        text_limiter, image_1k_limiter, image_high_limiter, video_limiter,
+    )
+    return {
+        l.name: l.snapshot()
+        for l in (text_limiter, image_1k_limiter, image_high_limiter, video_limiter)
+    }
+
+
+@app.get("/api/settings/test-concurrency")
+async def test_concurrency(
+    type: str = Query(..., description="测试类型: text/image/video"),
+    concurrency: int = Query(1, ge=1, le=10, description="并发数"),
+):
+    """测试并发数：同时发 N 个请求并统计成功/失败/耗时。
+
+    修复（vs 旧版）：
+      - 旧版硬编码 ``settings.agnes_base_url`` / ``settings.agnes_api_key``，但 Pydantic
+        的字段其实是 ``text_base_url``/``image_base_url``/``video_base_url``，导致旧版
+        实际全报异常（success=0）。
+      - 视频参数用 SKILL 规范的 ``width/height/num_frames/frame_rate``，不再使用
+        ``mode/seconds/size/aspect_ratio``（该旧字段在 agnes-video-v2.0 上被拒）。
+      - 读当前用户在“系统设置”页面保存的对应类型 base_url/api_key/model。
+    """
+    import httpx
+
+    if type == "text":
+        base_url, api_key, model = settings.text_base_url, settings.text_api_key, settings.text_model
+        endpoint = f"{base_url}/chat/completions"
+        body = {"model": model, "messages": [{"role": "user", "content": "Say OK"}], "max_tokens": 5}
+    elif type == "image":
+        base_url, api_key, model = settings.image_base_url, settings.image_api_key, settings.image_model
+        endpoint = f"{base_url}/images/generations"
+        # 与 SKILL 规范一致：size=1K + ratio=1:1
+        body = {"model": model, "prompt": "a simple test image",
+                "size": "1K", "ratio": "1:1", "n": 1,
+                "extra_body": {"response_format": "url"}}
+    elif type == "video":
+        base_url, api_key, model = settings.video_base_url, settings.video_api_key, settings.video_model
+        endpoint = f"{base_url}/videos"
+        # SKILL 规范：width/height/num_frames(8n+1)/frame_rate
+        body = {"model": model, "prompt": "a simple test video",
+                "width": 1152, "height": 768, "num_frames": 121, "frame_rate": 24}
+    else:
+        return {"error": f"未知类型: {type}"}
+
+    results = []
+    start_time = time.time()
+
+    async def single_request(index: int):
+        req_start = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    endpoint,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json=body,
+                )
+            elapsed = time.time() - req_start
+            ok = resp.status_code == 200
+            return {
+                "index": index,
+                "success": ok,
+                "status_code": resp.status_code,
+                "elapsed": round(elapsed, 2),
+                "error": None if ok else (resp.text[:200] if not ok else None),
+            }
+        except Exception as e:
+            elapsed = time.time() - req_start
+            return {"index": index, "success": False, "error": str(e),
+                    "elapsed": round(elapsed, 2)}
+
+    tasks_list = [single_request(i) for i in range(concurrency)]
+    results = await asyncio.gather(*tasks_list)
+
+    total_time = time.time() - start_time
+    success_count = sum(1 for r in results if r["success"])
+    fail_count = concurrency - success_count
+
+    return {
+        "type": type,
+        "concurrency": concurrency,
+        "endpoint": endpoint,
+        "model": model,
+        "success": success_count,
+        "failed": fail_count,
+        "total_time": round(total_time, 2),
+        "details": results,
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug,
+    )

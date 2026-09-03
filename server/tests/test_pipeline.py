@@ -1,0 +1,178 @@
+"""流水线终态单元测试（mock 外部 AI 服务）"""
+import sys
+import os
+import pytest
+import sqlite3
+import asyncio
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+class TestPipelinePendingReview:
+    """run_pipeline 自动阶段跑完后应进入 pending_review（Q2A）"""
+
+    def test_model_has_review_fields(self):
+        """Task 模型含 review_status/review_comment/reviewed_at"""
+        from app.models.task import Task
+        assert "review_status" in Task.__table__.columns
+        assert "review_comment" in Task.__table__.columns
+        assert "reviewed_at" in Task.__table__.columns
+
+    @pytest.mark.asyncio
+    async def test_run_pipeline_sets_pending_review(self, monkeypatch):
+        """mock 各阶段后，run_pipeline 终态为 pending_review + progress 95"""
+        from app.database import Base
+        from app.services.pipeline import pipeline_engine
+        from app.models.task import Task
+        from app.models.poem import Poem
+
+        # 用独立内存库避免污染生产库
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp.name}")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+
+        # mock 阶段方法（避免调用真实 AI API）
+        async def fake_hotspot(*a, **k):
+            return {"themes": ["思乡"], "keywords": ["明月", "故乡"], "style": "人生感悟"}
+        async def fake_script(*a, **k):
+            from app.services.critic import ScoreResult
+            return "床前明月光，疑是地上霜。", ScoreResult(score=8.0, passed=True, feedback="ok")
+        async def fake_storyboard(*a, **k):
+            return [{"time": "0-5s", "description": "画面"}]
+        async def fake_chars(*a, **k):
+            return None
+        async def fake_images(*a, **k):
+            return ["http://img/1.jpg"]
+        async def fake_video(*a, **k):
+            return "http://video/1.mp4"
+        async def fake_tts(*a, **k):
+            return {"success": True, "audio_url": "http://audio/1.mp3", "duration_ms": 15000}
+        async def fake_subtitle(*a, **k):
+            return "http://video/1.mp4"
+
+        monkeypatch.setattr(pipeline_engine, "fetch_hotspots_and_match", fake_hotspot)
+        monkeypatch.setattr(pipeline_engine, "_generate_script", fake_script)
+        monkeypatch.setattr(pipeline_engine, "_generate_storyboard", fake_storyboard)
+        monkeypatch.setattr("app.services.character.character_service.generate_character_reference", fake_chars)
+        monkeypatch.setattr(pipeline_engine, "_generate_images", fake_images)
+        monkeypatch.setattr(pipeline_engine, "_generate_video", fake_video)
+        monkeypatch.setattr(pipeline_engine, "_generate_tts", fake_tts)
+        monkeypatch.setattr(pipeline_engine, "_burn_subtitles", fake_subtitle)
+
+        async with Session() as db:
+            # 建一首诗 + 一个任务
+            db.add(Poem(id=1, title="静夜思", author="李白", dynasty="唐", content="床前明月光"))
+            await db.commit()
+            task = await pipeline_engine.create_task(db, 1, "douyin")
+            await pipeline_engine.run_pipeline(db, task.id)
+
+        # 终态断言
+        async with Session() as db:
+            from sqlalchemy import select
+            result = await db.execute(select(Task).where(Task.id == task.id))
+            saved = result.scalar_one()
+            assert saved.status == "pending_review"
+            assert saved.current_stage == "review"
+            assert saved.progress == 95
+            assert saved.review_status == "pending"
+
+
+class TestCleanAudioChain:
+    """#20260903 杂音修复：edge-tts 段禁用 afftdn/acompressor，避免干净信号被抬噪。
+
+    根因：afftdn nf=-30 假设噪声底 -30dB，而 edge-tts raw 噪声底仅 -45.5dB，
+    模型失配反而把底噪抬到 -35.4dB（听感"沙"）。轻链仅保留 highpass+loudnorm。
+    """
+
+    def test_full_chain_keeps_denoise(self):
+        """noise_reduce=True（cosyvoice 段）保留 afftdn/acompressor 全链"""
+        from app.services.pipeline import PipelineEngine
+        chain = PipelineEngine._af_chain(noise_reduce=True, sr=24000)
+        assert "afftdn" in chain
+        assert "acompressor" in chain
+        assert "loudnorm" in chain
+
+    def test_light_chain_drops_denoise(self):
+        """noise_reduce=False（edge-tts 段）去掉 afftdn/acompressor，仅轻清洗"""
+        from app.services.pipeline import PipelineEngine
+        chain = PipelineEngine._af_chain(noise_reduce=False, sr=24000)
+        assert "afftdn" not in chain
+        assert "acompressor" not in chain
+        assert "highpass=f=60" in chain
+        assert "loudnorm" in chain
+        assert "aresample=24000" in chain
+
+
+class TestSubtitleGoldenAndHold:
+    """video-comm 决策 5：金句字幕加权停留（_split_timeline）+ 金句识别 + 文案金句提取
+
+    金句字幕是可截图的"最小传播单元"：命中金句的 cue 按 golden_weight 放大"字数当量"
+    参与同镜时长池分配 → 停留显著长于普通过渡句。本组为纯静态方法单测，离线无 ffmpeg。
+    """
+
+    def test_extract_golden_from_script(self):
+        """文案脚本中的「引号句子」被抽成金句候选集"""
+        from app.services.pipeline import PipelineEngine
+        script = ('开篇铺垫……诗人写道「但愿人长久，千里共婵娟」，让异地的人破防；'
+                  '又引“明月几时有”作对照。')
+        out = PipelineEngine._extract_golden_from_script(script)
+        assert "但愿人长久，千里共婵娟" in out
+        assert "明月几时有" in out
+        assert PipelineEngine._extract_golden_from_script("") == []
+        assert PipelineEngine._extract_golden_from_script("全篇无引号也无金句") == []
+
+    def test_is_golden_cue_pool_and_quote(self):
+        """命中判定：金句池子串 或 cue 自带引号；短子串(<4字)防噪音"""
+        from app.services.pipeline import PipelineEngine
+        assert PipelineEngine._is_golden_cue(
+            "但愿人长久，千里共婵娟。", ["但愿人长久，千里共婵娟"])
+        assert not PipelineEngine._is_golden_cue(
+            "这句写的是苏轼的旷达。", ["但愿人长久，千里共婵娟"])
+        assert PipelineEngine._is_golden_cue("诗人说「但愿人长久」，异地的人最懂。", None)
+        assert not PipelineEngine._is_golden_cue("这句写的是苏轼的旷达。", None)
+        # 池子串 <4 字（如"明月"）过于宽泛，不命中
+        assert not PipelineEngine._is_golden_cue("今晚的明月格外亮", ["明月"])
+
+    def test_golden_cue_gets_longer_hold(self):
+        """同镜多 cue：命中金句的 cue 停留变长、起点前移（从普通句匀时），不越镜长
+
+        构造：max_chars=12（cpl=12,max_lines=1），文本拆为
+        cue1「先说铺垫话。」(6字) + cue2「他此刻的处境。让人沉默。」(12字，含金句)。
+        golden_weight=2.0 → cue2 当量 24 vs cue1 6 → 起点显著前移、停留变长。
+        """
+        from app.services.pipeline import pipeline_engine
+        tl = [(0.0, 10.0, "先说铺垫话。他此刻的处境。让人沉默。")]
+        plain = pipeline_engine._split_timeline(tl, chars_per_line=12, max_lines=1)
+        w = pipeline_engine._split_timeline(
+            tl, chars_per_line=12, max_lines=1,
+            golden_lines=["他此刻的处境"], golden_weight=2.0)
+        assert len(plain) == 2 and len(w) == 2
+
+        def locate(cues, needle):
+            for (_s, _e, t) in cues:
+                if needle in t.replace("\\N", ""):
+                    return _s, _e
+            return None
+
+        ps, pe = locate(plain, "他此刻的处境")
+        ws, we = locate(w, "他此刻的处境")
+        assert ps is not None and ws is not None
+        assert we - ws > pe - ps, f"金句停留应变长: plain={pe-ps:.2f}s weighted={we-ws:.2f}s"
+        assert ws < ps - 0.3, f"金句 cue 起点应前移(从普通句匀时): plain={ps:.2f} weighted={ws:.2f}"
+        assert w[-1][1] <= 10.0 + 1e-6  # 不越镜长
+
+    def test_no_golden_pool_keeps_legacy_behavior(self):
+        """无金句池 / 权重<=1 / 无命中：输出与旧版完全一致（回归保护）"""
+        from app.services.pipeline import pipeline_engine
+        tl = [(0.0, 8.0, "秋风起，落叶黄。诗人登高远望。")]
+        a = pipeline_engine._split_timeline(tl, chars_per_line=20, max_lines=2)
+        b = pipeline_engine._split_timeline(tl, chars_per_line=20, max_lines=2,
+                                            golden_lines=None, golden_weight=1.4)
+        c = pipeline_engine._split_timeline(tl, chars_per_line=20, max_lines=2,
+                                            golden_lines=["不存在的金句"], golden_weight=1.0)
+        assert a == b == c
