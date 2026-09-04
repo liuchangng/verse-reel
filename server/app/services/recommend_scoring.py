@@ -337,6 +337,34 @@ def score_poem(
     return base + add
 
 
+# ===== 6b. 相关性档位（2026-09-04 方案 B：名望作 tie-breaker） =====
+# 问题：score_poem 的 base = dynasty × prestige × classic 是三项相乘（唐宋名篇约 1.5~2.0），
+#       而相关性仅以 relevance × 0.5 相加（最多贡献 0.5）→ 名望乘积淹没热点相关性。
+#       实测：《李监宅》杜甫（与热点无关）在"苏轼《定风波》走红""秋日登高望远""中秋月圆夜"
+#       三个热点的 _rule_top_by_score Top1 均排第一。
+# 修正：在朝代 bucket 内先按相关性档位分层，档内再按 score（名望）决胜。
+#       语义：相关性决定"该不该来"，名望决定"来了排第几"——名望降级为 tie-breaker。
+# 保留兜底能力：若某 bucket 内无高/中相关候选（检索词跑偏），该桶最高档即 tier 0，
+#       仍按名望取首位的名家作品，不会退化为"当代打油诗刷屏"。
+_REL_TIER_HIGH = 0.9   # 候选池前 ~20%（n=200 时前 40 名）
+_REL_TIER_MID = 0.7    # 候选池前 ~60%（n=200 时前 120 名）
+
+
+def relevance_tier(rel: float | None) -> int:
+    """把连续相关性离散为档位：2=高相关，1=中相关，0=低相关/兜底区。
+
+    Args:
+        rel: 相关性，通常来自候选池索引归一化（0.5~1.0）；None 按 1.0 处理
+    """
+    if rel is None:
+        return 2
+    if rel >= _REL_TIER_HIGH:
+        return 2
+    if rel >= _REL_TIER_MID:
+        return 1
+    return 0
+
+
 # ===== 7. 朝代 bucket（多样性配额用） =====
 # 用户反馈：单一排序被高产当代刷屏；此处引入"朝代 bucket 配额"，
 # 保证 Top-3 多样性：A 古代正宗 ≥1 + B 明清优秀 ≥1 + 余下兜底。
@@ -425,19 +453,24 @@ def diverse_top_k(
         if kept:
             candidates = kept
     # 1) 按 bucket 分组 + 算 score
-    buckets: dict[str, list[tuple[PoemLike, float]]] = {b: [] for b in _BUCKET_ORDER}
+    buckets: dict[str, list[tuple[PoemLike, float, float]]] = {b: [] for b in _BUCKET_ORDER}
     for p in candidates:
         rel = relevance_fn(p) if relevance_fn else 1.0
         sc = score_poem(p, title=title, current=current, relevance=rel,
                        prest_table=prest_table, fame_table=fame_table)
         b = dynasty_bucket(p.dynasty, p.author)
-        buckets.setdefault(b, []).append((p, sc))
-    # 每个 bucket 内按 score 降序
+        buckets.setdefault(b, []).append((p, sc, rel))
+    # 每个 bucket 内：先按相关性档位分层，档内再按 score（名望）降序。
+    # 2026-09-04 方案 B：名望降级为 tie-breaker，避免"名家无关诗"（如《李监宅》杜甫）
+    # 压过主题更契合的候选。兜底仍在：桶内若无高/中相关项，取该桶 tier 0 的名家作品。
     for b in buckets.values():
-        b.sort(key=lambda x: -x[1])
+        b.sort(key=lambda x: (-relevance_tier(x[2]), -x[1]))
 
     # 2) 按配额取：先按预定 bucket 顺序分配，缺额按 fallback 顺序补齐
     #    同 bucket 内同作者只取一次（防止高产作者刷屏）
+    #    2026-09-04 方案 B 延伸：tier-0（不相关，池中靠后）候选不占保底配额、
+    #    也不在兜底时抢位——避免"硬性朝代配额"把无关唐宋诗（如《李监宅》杜甫）
+    #    保送进 Top1。若某 bucket 无 tier≥1 候选，该桶配额自然释放给其他相关桶。
     picked: list[tuple[PoemLike, float]] = []
     picked_ids: set[int] = set()
     seen_authors: set[str] = set()
@@ -445,9 +478,11 @@ def diverse_top_k(
     for b in _BUCKET_ORDER:
         want = quota.get(b, 0)
         added = 0
-        for p, sc in buckets.get(b, []):
+        for p, sc, _rel in buckets.get(b, []):
             if added >= want:
                 break
+            if relevance_tier(_rel) == 0:
+                continue  # tier-0 不相关：跳过，不占保底配额（继续找 tier≥1 填槽）
             if p.id in picked_ids:
                 continue
             if p.author and p.author in seen_authors:
@@ -457,11 +492,13 @@ def diverse_top_k(
             if p.author:
                 seen_authors.add(p.author)
             added += 1
-    # Fallback 阶段（补到 top_k，仍按 bucket 顺序）
+    # Fallback 阶段（补到 top_k，仍按 bucket 顺序；同样跳过 tier-0）
     for b in _BUCKET_ORDER:
         if len(picked) >= top_k:
             break
-        for p, sc in buckets.get(b, []):
+        for p, sc, _rel in buckets.get(b, []):
+            if relevance_tier(_rel) == 0:
+                continue  # tier-0 不相关：相关诗尚在其它桶，不抢位
             if p.id in picked_ids:
                 continue
             if p.author and p.author in seen_authors:

@@ -460,6 +460,46 @@ class TestFameIntegration:
         result = diverse_top_k(cands, title="秋日", fame_table=ft, top_k=1)
         assert result and result[0][0].author == "明代名家"
 
+    def test_diverse_top_k_relevance_beats_fame_within_bucket(self):
+        """2026-09-04 方案 B 回归守护：同 bucket 内相关性更高者优先于名望更高者。
+
+        旧逻辑 score = dynasty×prestige×classic（三项相乘），名望乘积淹没相关性，
+        导致《李监宅》杜甫（与热点无关）在多个无关热点 Top1。重构后 bucket 内按
+        (-relevance_tier, -score) 排序：高相关低名望诗应胜过低相关高名望诗，
+        名望降级为同档内的 tie-breaker。
+        """
+        def rel_fn(p):
+            return {1: 0.5, 2: 1.0}[p.id]  # id=1 低相关，id=2 高相关
+        cands = [
+            PoemLike(id=1, author="李白", dynasty="唐", content="短"),       # 高名望、低相关
+            PoemLike(id=2, author="二流唐人", dynasty="唐", content="短"),     # 低名望、高相关
+        ]
+        ft = {"李白": (95.0, "normal"), "二流唐人": (10.0, "normal")}
+        result = diverse_top_k(cands, title="某热点", fame_table=ft,
+                               relevance_fn=rel_fn, top_k=1)
+        assert result and result[0][0].id == 2, \
+            "高相关低名望诗应压过低相关高名望诗（方案 B：相关性决定'该不该来'）"
+
+    def test_soft_quota_releases_tier0_bucket_slot(self):
+        """2026-09-04 方案 B 延伸守护：某朝代桶无相关(tier-0)候选时，其保底配额释放，
+        不把无关诗保送进 Top-K（避免《李监宅》杜甫式硬配额抢位）。
+
+        构造：A 桶(唐)仅 1 首不相关(rel=0.5,tier0)；X 桶(当代)2 首高相关(rel≥0.9,tier2)。
+        默认配额 A:1,B:1,X:1,top_k=3。旧逻辑会强制取 A 桶的无关杜甫进 Top；
+        新逻辑跳过 tier-0 → A 配额释放 → Top-K 全来自 X 桶相关诗。
+        """
+        def rel_fn(p):
+            return {1: 1.0, 2: 0.95, 3: 0.5}[p.id]
+        cands = [
+            PoemLike(id=1, author="当代甲", dynasty="当代", content="秋日登高望远"),
+            PoemLike(id=2, author="当代乙", dynasty="当代", content="秋日登高望远"),
+            PoemLike(id=3, author="杜甫", dynasty="唐", content="无关内容"),  # tier0
+        ]
+        result = diverse_top_k(cands, title="秋日登高望远", relevance_fn=rel_fn, top_k=3)
+        picked_ids = [p.id for p, _ in result]
+        assert 3 not in picked_ids, "tier-0 不相关杜甫不应进 Top-K（配额已释放）"
+        assert set(picked_ids) <= {1, 2}, f"Top-K 应全为相关当代诗, got {picked_ids}"
+
     def test_diverse_top_k_no_fame_table_is_noop(self):
         """无 fame_table 时 diverse_top_k 行为与旧逻辑一致（不破坏召回）"""
         cands = [
