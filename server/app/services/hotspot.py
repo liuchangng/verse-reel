@@ -21,6 +21,35 @@ from app.services.recommend_scoring import (
 
 logger = logging.getLogger(__name__)
 
+# ===== H4 巨型同题组排除（设计文档 §10.6 H4 决议） =====
+# 总集/联语类（如梁鼎芬《课儿联》993 条）非短视频素材目标，占 43% 是噪音源。
+# 阈值 100：当前数据最大组 49 首，零影响；防御性预留应对未来数据扩展。
+_GIANT_GROUP_THRESHOLD = 100
+_giant_group_ids_cache: set[int] | None = None
+
+
+async def _get_giant_group_ids(db) -> set[int]:
+    """进程级缓存：查询 group_size > _GIANT_GROUP_THRESHOLD 的巨型组 ID 集合。
+    首次调用 GROUP BY 一次，后续直返 set。ETL 未建 group_id 时自动降级（空集）。"""
+    global _giant_group_ids_cache
+    if _giant_group_ids_cache is not None:
+        return _giant_group_ids_cache
+    import asyncio
+    try:
+        async with asyncio.Lock() as lock:
+            if _giant_group_ids_cache is None:
+                r = await db.execute(text(
+                    "SELECT group_id FROM poems "
+                    "WHERE group_id IS NOT NULL AND group_id != 0 "
+                    "GROUP BY group_id HAVING COUNT(*) > :threshold"
+                ).bindparams(threshold=_GIANT_GROUP_THRESHOLD))
+                _giant_group_ids_cache = {row[0] for row in r.fetchall()}
+                logger.info(f"巨型同题组过滤已启用: {_giant_group_ids_cache and len(_giant_group_ids_cache)} 个巨型组 (threshold={_GIANT_GROUP_THRESHOLD})")
+    except Exception as e:
+        logger.warning(f"巨型组查询失败（跳过过滤）: {e}")
+        _giant_group_ids_cache = set()
+    return _giant_group_ids_cache or set()
+
 # ===== 作者权威表：启动期一次性加载 + 进程内缓存 =====
 # 203 万首诗的 GROUP BY 一次 ~5s，避免每次推荐都重算。
 _prest_table_cache: dict[str, int] | None = None
@@ -779,6 +808,26 @@ class HotspotService:
                 merged = deduped
             except Exception as e:
                 logger.warning(f"组诗去重查询失败（跳过去重）: {e}")
+
+        # 2026-09-04 H4：巨型同题组排除（设计文档 §10.6 H4 决议）。
+        # 总集/联语类（如梁鼎芬《课儿联》993 条）非短视频素材，占 43% 是噪音源。
+        # 当前数据最大组 49 首，threshold=100 零影响；防御性预留应对未来数据扩展。
+        # 在组诗去重之后执行：先去重（每组合 1 首），再排除巨型组（整组不进候选池）。
+        if merged:
+            try:
+                giant_ids = await _get_giant_group_ids(db)
+                if giant_ids:
+                    gid_by_pid2 = {pid: gid_by_pid.get(pid) for pid in merged}
+                    filtered: list[int] = [
+                        pid for pid in merged
+                        if gid_by_pid2.get(pid) not in giant_ids
+                    ]
+                    excluded = len(merged) - len(filtered)
+                    if excluded:
+                        logger.info(f"H4 巨型组排除: {excluded} 条来自 {len(giant_ids)} 个巨型组 (threshold={_GIANT_GROUP_THRESHOLD})")
+                    merged = filtered
+            except Exception as e:
+                logger.warning(f"H4 巨型组过滤失败（跳过）: {e}")
 
         return merged
 

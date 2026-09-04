@@ -189,3 +189,51 @@ async def test_group_id_dedup_keeps_one_per_group(session):
     grp99 = [pid for pid in ids if pid in (1, 2)]
     assert len(grp99) == 1, f"同 group_id(99) 组诗应仅保留 1 首，实际 {grp99}"
     assert 3 in ids, "独立诗(group_id=None) 不受影响必须入选"
+
+
+@pytest.mark.asyncio
+async def test_giant_group_excluded_from_pool(session, monkeypatch):
+    """H4 守护：巨型同题组（group_size > threshold）整体排除出候选池。
+
+    模拟：构造一个"巨型组"group_id=777（size > 100），
+    其包含的诗不应出现在候选池；正常组诗仍正常召回。
+    """
+    # 巨型组（group_id=777，模拟超过 threshold）
+    session.add(Poem(id=1, title="课儿联其一", author="梁鼎芬", dynasty="清",
+                     content="联语其一", group_id=777))
+    session.add(Poem(id=2, title="课儿联其二", author="梁鼎芬", dynasty="清",
+                     content="联语其二", group_id=777))
+    # 正常组（group_id=888，size=2 < threshold）
+    session.add(Poem(id=3, title="秋兴其一", author="杜甫", dynasty="唐",
+                     content="秋兴", group_id=888))
+    session.add(Poem(id=4, title="秋兴其二", author="杜甫", dynasty="唐",
+                     content="秋兴", group_id=888))
+    # 独立诗（group_id=None）
+    session.add(Poem(id=5, title="独坐敬亭山", author="李白", dynasty="唐",
+                     content="独坐", group_id=None))
+    session.add_all([
+        PoemTerm(poem_id=1, term="课儿联", position=""),
+        PoemTerm(poem_id=2, term="课儿联", position=""),
+        PoemTerm(poem_id=3, term="秋兴", position=""),
+        PoemTerm(poem_id=4, term="秋兴", position=""),
+        PoemTerm(poem_id=5, term="独坐", position=""),
+    ])
+    await session.commit()
+
+    # Mock 巨型组查询：返回 {777}（模拟 group_id=777 有 >100 首）
+    async def fake_giant_ids(db):
+        return {777}
+
+    monkeypatch.setattr(hotspot, "_get_giant_group_ids", fake_giant_ids)
+
+    ids = await hotspot_service._rule_candidates(session, ["课儿联", "秋兴", "独坐"], limit=200)
+
+    # 巨型组 777 的诗应被排除
+    assert 1 not in ids and 2 not in ids, (
+        f"H4 巨型组(777) 的诗应被排除出候选池，但仍在: {ids}"
+    )
+    # 正常组 888 的诗应保留（去重后剩 1 首）
+    grp888 = [pid for pid in ids if pid in (3, 4)]
+    assert len(grp888) == 1, f"正常组(888) 应仅保留 1 首，实际 {grp888}"
+    # 独立诗不受影响
+    assert 5 in ids, "独立诗(group_id=None) 不受 H4 过滤影响"
