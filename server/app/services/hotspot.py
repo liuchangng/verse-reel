@@ -496,7 +496,13 @@ class HotspotService:
         for w in title_terms:
             result[w] = 1.0
         for t in theme_terms:
-            result[t] = min(result.get(t, 1.0), 0.3)  # 若精确词已占，保留 1.0
+            # 关键：仅在 term 未作为精确词出现时才赋 0.3；
+            # 若已在 result 中（精确词，权重 1.0），保持 1.0 不动。
+            # 旧代码用 min() 把精确词从 1.0 降为 0.3，是 #20260904-E2E 验收发现的 Bug：
+            # 例如"中秋月圆夜"中 jieba 精确产出"中秋"(1.0)，但月圆→扩展词含"中秋"，
+            # min(1.0, 0.3)=0.3 把精确词降权，导致候选池 Top1 偏离主题。
+            if t not in result:
+                result[t] = 0.3
         if not result:
             result = {"人生感悟": 0.3, "哲理": 0.3, "古典": 0.3}
         # 4. 按权重降序截断前 10（精确词恒在前）
