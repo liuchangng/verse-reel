@@ -464,46 +464,60 @@ class HotspotService:
         # 过滤短词
         return [w for w in words if len(w) >= 2]
 
-    def _keywords_to_terms(self, title: str) -> list[str]:
-        """热度标题 → 主题检索词（倒排表查询键）
+    def _keywords_to_terms(self, title: str) -> dict[str, float]:
+        """热度标题 → {检索词: 权重}（倒排表加权查询键）。
 
-        #20260903-A: 增加停用词过滤 + TOPIC_THEME_MAP 扩展。
+        #20260903-A: 停用词过滤 + TOPIC_THEME_MAP 扩展。
+        #20260904-问题7: 精确标题词(jieba)权重 1.0；TOPIC_THEME_MAP 扩展主题词
+        权重 0.3（宽泛，仅补位用）——避免"人生感悟/豪放/思乡/月亮"等宽标签命中的
+        海量无关诗污染候选池序，挤掉精确标题词（定风波/中秋/秋日）匹配的真正相关诗。
         流程：
-        1. TOPIC_THEME_MAP 命中主题，收集 themes（优先）
-        2. jieba 对标题分词，过滤停用词（与倒排表构建一致用 HMM=False）
-        3. 合并去重；若都为空，返回兜底主题词
+        1. TOPIC_THEME_MAP 命中主题，收集 themes（扩展，权重 0.3）
+        2. jieba 对标题分词，过滤停用词（精确，权重 1.0）
+        3. 合并：同一词若同时是精确词则保留 1.0（精确优先于扩展）
+        4. 按权重降序截断前 10，精确词恒在前
         """
         from app.utils.chinese import segment, add_special_words
         add_special_words()
 
-        # 1. 用 TOPIC_THEME_MAP 主题 → 检索词
+        # 1. 用 TOPIC_THEME_MAP 主题 → 扩展检索词（宽泛，低权重）
         theme_terms = set()
         for keyword, themes in TOPIC_THEME_MAP.items():
             if keyword in title:
                 for theme in themes:
                     theme_terms.add(theme)
 
-        # 2. 标题 jieba 分词补充，过滤停用词/单字/短虚词
+        # 2. 标题 jieba 分词补充，过滤停用词/单字/短虚词（精确，高权重）
         title_terms_raw = set(segment(title, hmm=False))
         title_terms = {w for w in title_terms_raw if w not in _STOPWORDS_JIEBA}
 
-        # 3. 合并；theme_terms 优先（语义标签权重更高），title_terms 兜底精确匹配
-        result = list(theme_terms | title_terms)
+        # 3. 合并：精确标题词权重 1.0，扩展主题词权重 0.3；同词取高
+        result: dict[str, float] = {}
+        for w in title_terms:
+            result[w] = 1.0
+        for t in theme_terms:
+            result[t] = min(result.get(t, 1.0), 0.3)  # 若精确词已占，保留 1.0
         if not result:
-            result = ["人生感悟", "哲理", "古典"]
-        return result[:10]
+            result = {"人生感悟": 0.3, "哲理": 0.3, "古典": 0.3}
+        # 4. 按权重降序截断前 10（精确词恒在前）
+        items = sorted(result.items(), key=lambda x: -x[1])[:10]
+        return dict(items)
 
     async def _rule_candidates(
         self,
         db,
-        keywords: list[str],
+        keywords: list[str] | dict[str, float],
         limit: int = 200,
     ) -> list[int]:
-        """规则初筛：倒排表 term IN (...) 精确匹配，聚合 poem_id 得分取 Top-N。
+        """规则初筛：倒排表 term IN (...) 加权匹配，聚合 poem_id 得分取 Top-N。
 
-        评分公式：score = hits*1.0 + golden_hits*3.0
-        - hits: 普通倒排词命中数（position 不区分）
-        - golden_hits: position='g' 金句命中数（设计权重 3x）
+        两阶段召回（#20260904-问题7 修复）：
+        - 阶段1（主路）：精确标题词(jieba) + 金句(position='g')，主路评分
+          `score = golden_hits*3.0 + precise_hits*1.0`，取 Top-N。
+        - 阶段2（扩展词仅补位）：TOPIC_THEME_MAP 扩展主题词（人生感悟/思乡/月亮 等
+          宽泛标签）不混入主路评分，仅当主路不足 limit 时按命中数补位填充剩余配额。
+        → 宽标签不再累积权重压过精确词，作者名(苏轼)被内容误命中也不污染池序。
+        - keywords 兼容 list（全精确 1.0，旧单测/调试用）与 dict（term→weight）。
         #20260903: limit 默认 200（原 20），让多样性策略有机会覆盖古代正宗 /
         明清优秀等 bucket（旧 20 候选全集中在同一朝代/作者桶里）。
         #20260903-P2: 接入 golden 加权，使金句库注入生效。
@@ -512,43 +526,73 @@ class HotspotService:
         if not db or not keywords:
             return []
 
-        kw_list = list(keywords)
+        # 归一化：dict → 精确词(>=1.0) / 扩展词(<1.0)；list → 全精确(权重1.0)
+        if isinstance(keywords, dict):
+            precise_terms = [k for k, w in keywords.items() if w >= 1.0]
+            expanded_terms = [k for k, w in keywords.items() if w < 1.0]
+        else:
+            precise_terms = list(keywords)
+            expanded_terms = []
 
-        # --- 主路：倒排表召回（含 golden 加权） ---
-        stmt = (
-            select(
-                PoemTerm.poem_id,
-                func.count().label("hits"),
-                func.sum(
-                    case((PoemTerm.position == "g", 1), else_=0)
-                ).label("golden_hits"),
-            )
-            .where(PoemTerm.term.in_(kw_list))
-            .group_by(PoemTerm.poem_id)
-            .order_by(
-                (func.count() + func.sum(
-                    case((PoemTerm.position == "g", 1), else_=0)
-                ) * 3).desc()
-            )
-            .limit(limit)
-        )
+        # --- 主路：精确词召回（高权重）+ 扩展词仅补位（2026-09-04 问题7） ---
+        # 精确标题词(jieba) 与金句(position='g') 走主路并主路评分排序取 Top-N；
+        # 扩展主题词(人生感悟/思乡/月亮 等宽泛标签) 不混入主路评分，仅当主路不足
+        # limit 时才补位——避免宽标签累积权重压过精确词，或作者名(苏轼)被内容误
+        # 命中污染池序（实测《燕魏杂记》吕颐浩因内容含"苏轼"被顶到定风波热点 Top1）。
         primary_ids: list[int] = []
-        try:
-            result = await db.execute(stmt)
-            rows = result.fetchall()
-            primary_ids = [row[0] for row in rows]
-            # 记录评分明细供日志
-            scored = [(row[0], row[1] + row[2] * 3, row[1], row[2]) for row in rows]
-            top5 = scored[:5]
-            logger.info(
-                f"_rule_candidates 倒排召回 {len(primary_ids)} 首，"
-                f"top5 评分明细: {[(pid, round(sc,1), h, gh) for pid,sc,h,gh in top5]}"
+
+        # 1) 精确词主路（金句加权 3.0，普通精确词 1.0）
+        if precise_terms:
+            precise_expr = case((PoemTerm.position == "g", 3.0), else_=1.0)
+            stmt = (
+                select(
+                    PoemTerm.poem_id,
+                    func.sum(precise_expr).label("score"),
+                    func.count().label("hits"),
+                    func.sum(case((PoemTerm.position == "g", 1), else_=0)).label("golden_hits"),
+                )
+                .where(PoemTerm.term.in_(precise_terms))
+                .group_by(PoemTerm.poem_id)
+                .order_by(func.sum(precise_expr).desc())
+                .limit(limit)
             )
-        except Exception as e:
-            # 主路失效 = 推荐退化为纯名望兜底（主题相关性全丢），属严重降级而非可忽略告警，
-            # 故用 error + 堆栈保证可观测。此处不重抛，是为了让 fame 兜底仍能产出候选，
-            # 保住接口可用性（2026-09-04: 曾因漏 import `case` 使主路静默失效未被发现）。
-            logger.error(f"倒排表初筛失败（主路召回失效，将退化为名望兜底）: {e}", exc_info=True)
+            try:
+                result = await db.execute(stmt)
+                rows = result.fetchall()
+                primary_ids = [row[0] for row in rows]
+                scored = [(row[0], row[1], row[2], row[3]) for row in rows]
+                logger.info(
+                    f"_rule_candidates 精确词召回 {len(primary_ids)} 首，"
+                    f"top5 评分明细: {[(pid, round(sc, 1), h, gh) for pid, sc, h, gh in scored[:5]]}"
+                )
+            except Exception as e:
+                # 主路失效 = 推荐退化为纯名望兜底（主题相关性全丢），属严重降级而非可忽略告警，
+                # 故用 error + 堆栈保证可观测。此处不重抛，是为了让 fame 兜底仍能产出候选，
+                # 保住接口可用性（2026-09-04: 曾因漏 import `case` 使主路静默失效未被发现）。
+                logger.error(f"倒排表精确词初筛失败（主路召回失效，将退化为名望兜底）: {e}", exc_info=True)
+
+        # 2) 扩展主题词仅补位：主路不足 limit 时才用宽标签填充剩余配额
+        if expanded_terms and len(primary_ids) < limit:
+            gap = limit - len(primary_ids)
+            stmt2 = (
+                select(PoemTerm.poem_id, func.count().label("hits"))
+                .where(PoemTerm.term.in_(expanded_terms))
+                .group_by(PoemTerm.poem_id)
+                .order_by(func.count().desc())
+                .limit(gap)
+            )
+            try:
+                result2 = await db.execute(stmt2)
+                added = 0
+                for (pid, _hits) in result2.fetchall():
+                    if pid not in primary_ids:
+                        primary_ids.append(pid)
+                        added += 1
+                        if len(primary_ids) >= limit:
+                            break
+                logger.info(f"_rule_candidates 扩展词补位 {added} 首（主路缺口 {gap}）")
+            except Exception as e:
+                logger.error(f"倒排表扩展词补位失败: {e}", exc_info=True)
 
         # --- C 兜底：名望 S/A 档作者的代表作（fame>=70 且 normal）---
         # 即使倒排召回满 200 首，也确保名家的标志性作品有机会进入候选池，
@@ -728,7 +772,7 @@ class HotspotService:
             base = by_id.get(p.id, {})
             item = dict(base)
             item["match_reason"] = (
-                f"主题词命中：{', '.join(self._keywords_to_terms(title)[:2])}（评分 {sc:.2f}）"
+                f"主题词命中：{', '.join(list(self._keywords_to_terms(title).keys())[:2])}（评分 {sc:.2f}）"
             )
             result.append(item)
         return result

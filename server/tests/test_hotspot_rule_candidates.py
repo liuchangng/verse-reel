@@ -128,3 +128,42 @@ async def test_fallback_does_not_occupy_top_slot(session, monkeypatch):
     assert ids.index(1) < ids.index(2), (
         f"兜底诗不应排在主路命中诗之前，否则热点相关性被兜底淹没；实际顺序 {ids}"
     )
+
+
+@pytest.mark.asyncio
+async def test_expanded_terms_excluded_when_precise_pool_full(session):
+    """2026-09-04 问题7（两阶段）守护：扩展主题词只做补位，不进主路池。
+    精确词已填满候选池时，仅命中扩展词的无关诗被排除；精确词诗必在池中。
+
+    构造（模拟 '苏轼《定风波》走红' 污染场景）：
+      poem1 仅命中扩展词 '人生感悟'(0.3)
+      poem2 命中精确词 '定风波'(1.0)
+      limit=200，定风波池远未满 → poem1 不应入选（扩展词不污染主路）
+    """
+    session.add(Poem(id=1, title="无关杂记", author="张三", dynasty="宋", content="x"))
+    session.add(Poem(id=2, title="定风波词", author="李四", dynasty="宋", content="y"))
+    session.add(PoemTerm(poem_id=1, term="人生感悟", position=""))  # 扩展词
+    session.add(PoemTerm(poem_id=2, term="定风波", position=""))    # 精确词
+    await session.commit()
+
+    # limit=1 模拟"精确词池已满"：定风波(精确) 占满唯一名额，扩展词不补位
+    ids = await hotspot_service._rule_candidates(
+        session, {"定风波": 1.0, "人生感悟": 0.3}, limit=1
+    )
+    assert 2 in ids, "精确词诗必须入选"
+    assert 1 not in ids, "仅命中扩展词的无关诗在主路池已满时不应入选（扩展词仅补位）"
+
+
+@pytest.mark.asyncio
+async def test_expanded_terms_fill_gap_when_precise_short(session):
+    """2026-09-04 问题7（两阶段）守护：精确词召回不足 limit 时，扩展词补位生效。
+
+    构造：仅扩展词 '人生感悟'(0.3) 命中 poem1，无精确词 → 阶段1 空，阶段2 补位取 poem1。
+    """
+    session.add(Poem(id=1, title="泛主题诗", author="张三", dynasty="宋", content="x"))
+    session.add(PoemTerm(poem_id=1, term="人生感悟", position=""))
+    await session.commit()
+
+    # 全扩展词（无精确词）→ 走补位通道
+    ids = await hotspot_service._rule_candidates(session, {"人生感悟": 0.3}, limit=200)
+    assert 1 in ids, "精确词缺失时扩展词补位应仍能召回候选（保住泛主题兜底）"
