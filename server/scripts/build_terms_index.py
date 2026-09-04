@@ -110,7 +110,7 @@ def build_index(conn, limit=None, resume=False):
             break
 
         for poem_id, title, content, author in rows:
-            # 拼接标题 + 正文分词。
+            # 拼接标题 + 正文 + 作者分词。
             # 注意：数据已抽样验证为简体（5000 首仅 0.06% 边缘字形差异，非真繁体），
             # 故跳过 OpenCC to_simplified，省去每首 2 次无谓转换（约 8 分钟）。
             # 若将来导入繁体重度数据，重建索引时再按需开启。
@@ -119,6 +119,13 @@ def build_index(conn, limit=None, resume=False):
                 text_parts.append(("t", title))
             if content:
                 text_parts.append(("c", content))
+            # #20260904-E2E: 补充作者名索引。
+            # 原 ETL 仅索引 title+content，导致"苏轼《定风波》走红"类热点无法召回
+            # 苏轼作品（因 poem_terms 中"苏轼"命中 939 首是"提及苏轼"的诗，
+            # 而非"苏轼所作"的诗）。补充 author 字段（position='a'）后，
+            # 作者名查询可直接召回该作者全部作品。
+            if author and len(author) >= 2:
+                text_parts.append(("a", author))
 
             # 逐部分分词并去重（每首每个 term 只记一次，position 标记首现）
             # hmm=False：纯词典切分，速度 2.3x（2020 vs 873 poems/s），
