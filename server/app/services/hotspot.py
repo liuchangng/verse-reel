@@ -652,6 +652,30 @@ class HotspotService:
                 break
             merged.append(pid)
             reserved.add(pid)
+
+        # 2026-09-04 问题4：组诗归组去重（P1 ETL 已建 group_id）。
+        # 同 group_id 的组诗（如《秋兴八首》8 条）仅保留池中评分最高(最前)的 1 首，
+        # 消除"组诗占满 8 个候选槽、同质重复"问题——这是 P1 归组的原定验收目标。
+        # group_id 为 NULL（独立作品/未归组）不受影响；查不到 group_id 时原样返回。
+        if merged:
+            try:
+                grp_rows = await db.execute(
+                    select(Poem.id, Poem.group_id).where(Poem.id.in_(merged))
+                )
+                gid_by_pid = {r[0]: r[1] for r in grp_rows.fetchall()}
+                seen_groups: set[int] = set()
+                deduped: list[int] = []
+                for pid in merged:
+                    g = gid_by_pid.get(pid)
+                    if g is not None:
+                        if g in seen_groups:
+                            continue
+                        seen_groups.add(g)
+                    deduped.append(pid)
+                merged = deduped
+            except Exception as e:
+                logger.warning(f"组诗去重查询失败（跳过去重）: {e}")
+
         return merged
 
     async def _llm_select(

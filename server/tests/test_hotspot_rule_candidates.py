@@ -167,3 +167,25 @@ async def test_expanded_terms_fill_gap_when_precise_short(session):
     # 全扩展词（无精确词）→ 走补位通道
     ids = await hotspot_service._rule_candidates(session, {"人生感悟": 0.3}, limit=200)
     assert 1 in ids, "精确词缺失时扩展词补位应仍能召回候选（保住泛主题兜底）"
+
+
+@pytest.mark.asyncio
+async def test_group_id_dedup_keeps_one_per_group(session):
+    """2026-09-04 问题4 守护：同 group_id 组诗仅保留池中 1 首，消除同质重复占位。
+
+    构造：《秋兴八首》其一/其二 同 group_id=99 均命中 '秋兴'；独立诗 group_id=None。
+    期望 group_id=99 在返回中仅出现 1 次（其一在前、其二被去重），独立诗不受影响。
+    """
+    session.add(Poem(id=1, title="秋兴八首其一", author="杜甫", dynasty="唐", content="秋兴", group_id=99))
+    session.add(Poem(id=2, title="秋兴八首其二", author="杜甫", dynasty="唐", content="秋兴", group_id=99))
+    session.add(Poem(id=3, title="独立诗", author="李白", dynasty="唐", content="秋兴", group_id=None))
+    session.add_all([
+        PoemTerm(poem_id=1, term="秋兴", position=""),
+        PoemTerm(poem_id=2, term="秋兴", position=""),
+        PoemTerm(poem_id=3, term="秋兴", position=""),
+    ])
+    await session.commit()
+    ids = await hotspot_service._rule_candidates(session, ["秋兴"], limit=200)
+    grp99 = [pid for pid in ids if pid in (1, 2)]
+    assert len(grp99) == 1, f"同 group_id(99) 组诗应仅保留 1 首，实际 {grp99}"
+    assert 3 in ids, "独立诗(group_id=None) 不受影响必须入选"
