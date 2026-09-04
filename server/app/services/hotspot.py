@@ -582,13 +582,26 @@ class HotspotService:
         logger.info(
             f"_rule_candidates: 倒排召回 {len(primary_ids)} 首 + 名望兜底 {len(fame_ids)} 首 → 合并保底 ≤{limit}"
         )
-        # C 兜底语义：S/A 档代表作"占位优先"，倒排按相关性填满剩余容量。
-        # 不能简单 append 后 [:limit]——倒排满 200 时尾部的 fame 会被整体截掉，
-        # 兜底失效；也不宜无上限扩池——_llm_select 会把全部候选拼进 prompt，
-        # 超过 200 条会让 LLM 响应截断/解析失败概率上升。
-        merged: list[int] = list(fame_ids[:limit])
-        reserved: set[int] = set(merged)
+        # C 兜底语义（2026-09-04 修正）：名家作品只保证"入选"，不再保证"排前"。
+        # 旧逻辑把 fame_ids 放在 merged 头部（占位优先），导致候选池前 52 位恒为兜底，
+        # 而 _rule_top_by_score 的 rel() 按候选索引给相关性分 → 兜底诗恒得高分 →
+        # 无论什么热点 Top1 都是同一首兜底诗（实测《李监宅》杜甫在两个无关热点均 Top1）。
+        # 现改为：主路（主题相关）优先填至 main_cap，兜底用剩余容量补位，
+        # 既保住"检索词跑偏时名家兜底"的原意，又让热点相关性决定前排。
+        # 兜底不留空：给固定配额 FALLBACK_QUOTA，避免倒排满 limit 时兜底被整体截掉。
+        # 也不宜无上限扩池——_llm_select 会把全部候选拼进 prompt，超 200 条易致 LLM 截断。
+        FALLBACK_QUOTA = 50
+        main_cap = limit - FALLBACK_QUOTA if limit > FALLBACK_QUOTA else limit
+        merged: list[int] = []
+        reserved: set[int] = set()
         for pid in primary_ids:
+            if pid in reserved:
+                continue
+            if len(merged) >= main_cap:
+                break
+            merged.append(pid)
+            reserved.add(pid)
+        for pid in fame_ids:
             if pid in reserved:
                 continue
             if len(merged) >= limit:

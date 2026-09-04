@@ -100,3 +100,31 @@ async def test_golden_term_weighted_3x(session):
 async def test_empty_keywords_returns_empty(session):
     """检索词为空 → 直接返回空（不查库）。"""
     assert await hotspot_service._rule_candidates(session, [], limit=200) == []
+
+
+@pytest.mark.asyncio
+async def test_fallback_does_not_occupy_top_slot(session, monkeypatch):
+    """兜底只保证"入选"，不保证"排前"（2026-09-04 修正）。
+
+    旧逻辑把 fame_ids 放在候选池头部（占位优先），而 _rule_top_by_score 的 rel()
+    按候选索引给相关性分 → 兜底诗恒得高分 → 无论什么热点 Top1 都是同一首兜底诗
+    （实测《李监宅》杜甫在"秋日登高望远"与"中秋月圆夜"两个无关热点里均排 Top1）。
+    """
+    session.add(Poem(id=1, title="秋日登高", author="张三", dynasty="唐", content="秋日"))
+    session.add(Poem(id=2, title="名家代表作", author="李白", dynasty="唐", content="无关联"))
+    session.add(PoemTerm(poem_id=1, term="秋日", position=""))  # 仅 poem1 命中检索词
+    await session.commit()
+
+    # 构造名望表：李白 S 档 → 其作品进兜底池
+    async def fake_fame(db):
+        return {"李白": (95.0, "normal")}
+
+    monkeypatch.setattr(hotspot, "_get_fame_table", fake_fame)
+
+    ids = await hotspot_service._rule_candidates(session, ["秋日"], limit=200)
+
+    assert 1 in ids, "主路命中的主题相关诗必须入选"
+    assert 2 in ids, "兜底诗仍须入选（保住'检索词跑偏时名家兜底'的原意）"
+    assert ids.index(1) < ids.index(2), (
+        f"兜底诗不应排在主路命中诗之前，否则热点相关性被兜底淹没；实际顺序 {ids}"
+    )
