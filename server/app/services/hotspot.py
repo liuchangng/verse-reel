@@ -76,6 +76,46 @@ def reset_fame_table_cache() -> None:
     global _fame_table_cache
     _fame_table_cache = None
 
+
+# ===== Golden 缓存：模块级单例，避免每次调用都读文件 =====
+# #20260904-E2E-问题3 修复：金句库加载一次，进程内复用。
+_golden_lines_cache: list[dict] | None = None
+
+
+def reset_golden_cache() -> None:
+    """清空 golden 缓存（测试隔离或数据更新后调用）。"""
+    global _golden_lines_cache
+    _golden_lines_cache = None
+
+
+def _get_golden_lines() -> list[dict]:
+    """懒加载 golden_lines.json（进程级缓存，首次调用后复用）。
+
+    文件位置：server/data/golden_lines.json（92 条手工 curate 金句）。
+    #20260904-E2E-问题3 根因：jieba 碎片与 golden 整句永不相等 → golden 命中恒为 0；
+    本方法返回原始金句列表，由 _keywords_to_terms 做子串匹配后再标注权重。
+    """
+    global _golden_lines_cache
+    if _golden_lines_cache is not None:
+        return _golden_lines_cache
+    import json
+    from pathlib import Path
+    # golden_lines.json 位于 server/data/（相对于项目根），hotspot.py 在 server/app/services/
+    project_root = Path(__file__).parent.parent.parent
+    gold_file = project_root / "data" / "golden_lines.json"
+    with open(gold_file, "r", encoding="utf-8") as f:
+        _golden_lines_cache = json.load(f)
+    logger.info(f"Golden 金句库已加载: {_golden_lines_cache and len(_golden_lines_cache)} 句")
+    return _golden_lines_cache
+
+
+def _term_is_golden(term: str, golden_lines: list[dict]) -> bool:
+    """判断一个 jieba 词是否出现在某条 golden line 中（子串匹配）。
+
+    例如 "长风破浪" in "长风破浪会有时，直挂云帆济沧海" → True。
+    """
+    return any(term in line.get("line", "") for line in golden_lines)
+
 # 热搜平台配置
 HOTSPOT_SOURCES = {
     "weibo": {"name": "微博", "api": "https://weibo.com/ajax/side/hotSearch"},
@@ -493,21 +533,36 @@ class HotspotService:
         title_terms_raw = set(segment(title, hmm=False))
         title_terms = {w for w in title_terms_raw if w not in _STOPWORDS_JIEBA}
 
-        # 3. 合并：精确标题词权重 1.0，扩展主题词权重 0.3；同词取高
+        # 3. #20260904-E2E-问题3 修复：golden 子串匹配
+        #    根因：jieba 产出碎片（"有时"），golden 存整句（"长风破浪会有时..."），
+        #    两者永不相等 → position='g' 命中恒为 0 → golden 加权死代码。
+        #    方案 A：查询侧子串匹配，对 jieba 词 + 扩展主题词都检查是否被 golden line 包含。
+        golden_lines = _get_golden_lines() or []
+        gold_terms = {w for w in title_terms | theme_terms if _term_is_golden(w, golden_lines)}
+        if gold_terms:
+            logger.debug(
+                f"_keywords_to_terms golden 命中 {len(gold_terms)} 个词: "
+                f"{sorted(gold_terms)[:5]}"
+            )
+
+        # 4. 合并：精确标题词权重 1.0（golden 命中词权重 3.0），扩展主题词权重 0.3；同词取高
         result: dict[str, float] = {}
         for w in title_terms:
-            result[w] = 1.0
+            if w in gold_terms:
+                result[w] = 3.0  # golden 命中：3x 加权（与 position='g' SQL 加权一致）
+            else:
+                result[w] = 1.0
         for t in theme_terms:
-            # 关键：仅在 term 未作为精确词出现时才赋 0.3；
-            # 若已在 result 中（精确词，权重 1.0），保持 1.0 不动。
+            # 关键：仅在 term 未作为精确词出现时才赋 0.3（或 golden 命中的 3.0）；
+            # 若已在 result 中（精确词），保持原值不动。
             # 旧代码用 min() 把精确词从 1.0 降为 0.3，是 #20260904-E2E 验收发现的 Bug：
             # 例如"中秋月圆夜"中 jieba 精确产出"中秋"(1.0)，但月圆→扩展词含"中秋"，
             # min(1.0, 0.3)=0.3 把精确词降权，导致候选池 Top1 偏离主题。
             if t not in result:
-                result[t] = 0.3
+                result[t] = 3.0 if t in gold_terms else 0.3
         if not result:
             result = {"人生感悟": 0.3, "哲理": 0.3, "古典": 0.3}
-        # 4. 按权重降序截断前 10（精确词恒在前）
+        # 5. 按权重降序截断前 10（精确词恒在前，golden 命中词更高优先级）
         items = sorted(result.items(), key=lambda x: -x[1])[:10]
         return dict(items)
 
