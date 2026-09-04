@@ -5,7 +5,8 @@ from typing import Optional
 from enum import Enum
 
 import httpx
-from sqlalchemy import select, func, text
+# case: P2 金句加权（position='g' 条件聚合）依赖，勿删——缺失会让主路召回静默失效
+from sqlalchemy import select, func, text, case
 from datetime import datetime, timedelta
 
 from app.models.poem_term import PoemTerm
@@ -544,7 +545,10 @@ class HotspotService:
                 f"top5 评分明细: {[(pid, round(sc,1), h, gh) for pid,sc,h,gh in top5]}"
             )
         except Exception as e:
-            logger.warning(f"倒排表初筛失败: {e}")
+            # 主路失效 = 推荐退化为纯名望兜底（主题相关性全丢），属严重降级而非可忽略告警，
+            # 故用 error + 堆栈保证可观测。此处不重抛，是为了让 fame 兜底仍能产出候选，
+            # 保住接口可用性（2026-09-04: 曾因漏 import `case` 使主路静默失效未被发现）。
+            logger.error(f"倒排表初筛失败（主路召回失效，将退化为名望兜底）: {e}", exc_info=True)
 
         # --- C 兜底：名望 S/A 档作者的代表作（fame>=70 且 normal）---
         # 即使倒排召回满 200 首，也确保名家的标志性作品有机会进入候选池，
