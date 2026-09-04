@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from app.models.poem_term import PoemTerm
 from app.models.poem import Poem
 from app.models.hotspot import Hotspot
+from app.models.poem_tag import PoemTag
 from app.services.agnes import agnes_client
 from app.services.recommend_scoring import (
     PoemLike, score_poem, diverse_top_k,
@@ -656,6 +657,46 @@ class HotspotService:
                 logger.info(f"_rule_candidates 扩展词补位 {added} 首（主路缺口 {gap}）")
             except Exception as e:
                 logger.error(f"倒排表扩展词补位失败: {e}", exc_info=True)
+
+        # 3) #20260904-E2E-问题4 修复：poem_tags 标签补位
+        #    根因：poem_tags 表有 926K 条标签（中秋 10,993 首、重阳 20,194 首、季节标签 1.6M 首），
+        #    但整个推荐链路从未消费该表，P1 ETL 做完但推荐没用上。
+        #    方案：追加第三阶段，用标签（tag）查 poem_tags 补位，权重 0.2（低于扩展词 0.3）。
+        #    语义：jieba 碎片（"月圆夜"）→ 扩展词命中（"月亮"）→ 仍可能召回低相关诗；
+        #          标签直查（"中秋"）→ 10,993 首明确标注诗 → 更高精度补位。
+        if len(primary_ids) < limit:
+            # 从 keywords 中提取可匹配标签：精确词(golden=3.0/普通=1.0) + 扩展词(0.3)
+            tag_candidates = []
+            for term, weight in keywords.items() if isinstance(keywords, dict) else []:
+                # 只取权重较高的关键词作为标签候选（避免噪音词进标签表）
+                if weight >= 0.3 and len(term) <= 10:
+                    tag_candidates.append(term)
+            # 去重并按权重降序排列，优先用高权重关键词
+            tag_candidates = list(dict.fromkeys(tag_candidates))[:20]
+            if tag_candidates and len(primary_ids) < limit:
+                tag_gap = limit - len(primary_ids)
+                try:
+                    stmt3 = (
+                        select(PoemTag.poem_id, func.count().label("tag_hits"))
+                        .where(PoemTag.tag.in_(tag_candidates))
+                        .group_by(PoemTag.poem_id)
+                        .order_by(func.count().desc())
+                        .limit(tag_gap * 2)  # 多查一些再过滤，防止去重后不够
+                    )
+                    result3 = await db.execute(stmt3)
+                    added = 0
+                    for (pid, _tag_hits) in result3.fetchall():
+                        if pid not in primary_ids:
+                            primary_ids.append(pid)
+                            added += 1
+                            if len(primary_ids) >= limit:
+                                break
+                    logger.info(
+                        f"_rule_candidates poem_tags 补位 {added} 首 "
+                        f"(标签候选 {len(tag_candidates)} 个，主路缺口 {tag_gap})"
+                    )
+                except Exception as e:
+                    logger.error(f"poem_tags 补位失败: {e}", exc_info=True)
 
         # --- C 兜底：名望 S/A 档作者的代表作（fame>=70 且 normal）---
         # 即使倒排召回满 200 首，也确保名家的标志性作品有机会进入候选池，
