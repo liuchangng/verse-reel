@@ -131,12 +131,25 @@ async def create_task(
 
 
 @router.delete("/batch-clear")
-async def clear_all_tasks(db: AsyncSession = Depends(get_db)):
+async def clear_all_tasks(
+    confirm: str = Query("NO", description="二次确认：必须传 confirm=YES 才执行（安全加固 REQ-S3）"),
+    db: AsyncSession = Depends(get_db),
+):
     """清空全部任务数据（级联清理 jobs + scripts + 产物文件）
 
     ⚠️ 破坏性操作：删除 tasks 全行、关联 generation_jobs、scripts 表，
     以及 server/data/output/ 下所有 task_* 产物目录。用于「重新开始」场景。
+    安全加固：必须 confirm=YES + 破坏性限频，否则 400/429。
     """
+    from app.services.rate_limiter import api_limiter_destructive
+
+    # 二次确认（在删除逻辑之前拦截，杜绝无副作用误触发）
+    if confirm != "YES":
+        raise HTTPException(status_code=400, detail="危险操作：必须传 confirm=YES 确认")
+    # 破坏性操作限频（满窗立即 429）
+    if not await api_limiter_destructive.acquire(timeout=0):
+        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
+
     import os, shutil
     from sqlalchemy import text
 
@@ -322,9 +335,17 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
 async def publish_task(
     task_id: int,
     platforms: list[str] = Query(["douyin"], description="发布平台列表"),
+    confirm: str = Query("NO", description="二次确认：必须传 confirm=YES 才执行（安全加固 REQ-S3）"),
     db: AsyncSession = Depends(get_db),
 ):
-    """发布任务视频到各平台"""
+    """发布任务视频到各平台
+
+    安全加固：对外发布属高风险操作，必须 confirm=YES 二次确认，否则 400。
+    """
+    # 二次确认（在业务查询之前拦截）
+    if confirm != "YES":
+        raise HTTPException(status_code=400, detail="发布需二次确认：必须传 confirm=YES")
+
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -491,8 +512,13 @@ async def batch_generate(
       - 视频 跨任务串行（video_concurrency=1 + 62s 最小间隔）
     故接口层无需额外调度，直接逐任务 ``enqueue_task`` 即可。各任务内部的
     依赖补全（``_expand_prereqs``）与死锁自愈（``_heal_prereqs``）照常生效。
+    安全加固：批量操作接口限频（满窗 429）。
     """
     from app.services.queue import queue_service, STAGE_ORDER
+    from app.services.rate_limiter import api_limiter_heavy
+
+    if not await api_limiter_heavy.acquire(timeout=0):
+        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
 
     stage_alias = {"storyboard": "image", "spot": "script"}
     stage = stage_alias.get(req.stage, req.stage)

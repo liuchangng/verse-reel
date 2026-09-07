@@ -277,7 +277,13 @@ async def test_concurrency(
       - 视频参数用 SKILL 规范的 ``width/height/num_frames/frame_rate``，不再使用
         ``mode/seconds/size/aspect_ratio``（该旧字段在 agnes-video-v2.0 上被拒）。
       - 读当前用户在“系统设置”页面保存的对应类型 base_url/api_key/model。
+      安全加固：接口限频（满窗 429），防止被刷消耗额度。
     """
+    from app.services.rate_limiter import api_limiter_heavy
+
+    if not await api_limiter_heavy.acquire(timeout=0):
+        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
+
     import httpx
 
     if type == "text":

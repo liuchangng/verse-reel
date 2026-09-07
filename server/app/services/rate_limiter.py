@@ -107,6 +107,12 @@ image_high_limiter = RateLimiter(rpm=8, name="image-2K+")
 # 视频：官方 2，实际 1 → 1（不打折，单数）
 video_limiter = RateLimiter(rpm=1, name="video")
 
+# ---- 接口层限频（安全加固 REQ-S3：防刷/防滥用，非外部 API 节流）----
+# 用法：await limiter.acquire(timeout=0) —— 满窗立即返回 False → 接口回 429（只拒不等待）
+api_limiter_general = RateLimiter(rpm=60, name="api-general")        # 兜底（未细分接口）
+api_limiter_heavy = RateLimiter(rpm=10, name="api-heavy")            # test-concurrency / batch/generate
+api_limiter_destructive = RateLimiter(rpm=3, name="api-destructive") # batch-clear 破坏性操作
+
 
 def get_image_limiter(size: str | None) -> RateLimiter:
     """按 size 选图片档位：含 "K" 后大于 1 视为高分辨率（2K+）。"""
@@ -124,4 +130,7 @@ __all__ = [
     "image_high_limiter",
     "video_limiter",
     "get_image_limiter",
+    "api_limiter_general",
+    "api_limiter_heavy",
+    "api_limiter_destructive",
 ]
