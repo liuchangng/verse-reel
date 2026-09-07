@@ -4,7 +4,8 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Header, Depends
+from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -27,6 +28,19 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+async def require_token(authorization: str | None = Header(default=None)):
+    """Bearer Token 鉴权依赖（安全加固 REQ-S2）。
+
+    - app_token 未配置（空）→ 503 fail-closed（服务配置问题，拒绝一切受保护访问）
+    - Authorization 头 != "Bearer <app_token>" → 401
+    /health 与 / 不挂本依赖（探活豁免）。
+    """
+    if not settings.app_token:
+        raise HTTPException(status_code=503, detail="服务未配置 APP_TOKEN（请在 .env 设置后重启）")
+    if authorization != f"Bearer {settings.app_token}":
+        raise HTTPException(status_code=401, detail="未授权：token 缺失或不匹配")
 
 
 @asynccontextmanager
@@ -76,13 +90,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由
-app.include_router(poems.router, prefix="/api/poems", tags=["诗词"])
-app.include_router(tasks.router, prefix="/api/tasks", tags=["任务"])
-app.include_router(hotspots.router, prefix="/api/hotspots", tags=["热点"])
-app.include_router(ws.router, prefix="/ws", tags=["WebSocket"])
+# 注册路由（安全加固：全部 /api 挂 Bearer Token 鉴权，见 require_token）
+app.include_router(poems.router, prefix="/api/poems", tags=["诗词"], dependencies=[Depends(require_token)])
+app.include_router(tasks.router, prefix="/api/tasks", tags=["任务"], dependencies=[Depends(require_token)])
+app.include_router(hotspots.router, prefix="/api/hotspots", tags=["热点"], dependencies=[Depends(require_token)])
 # TTS 已合并进主后端（进程内，默认 edge-tts，CosyVoice2 就绪后 auto 优先）
-app.include_router(tts.router, prefix="/api/tts", tags=["TTS"])
+app.include_router(tts.router, prefix="/api/tts", tags=["TTS"], dependencies=[Depends(require_token)])
+# WebSocket 不走 HTTP 依赖，token 在 ws.py 端内校验（query_params["token"]）
+app.include_router(ws.router, prefix="/ws", tags=["WebSocket"])
 
 # 静态服务：把本地产物目录（视频/音频/字幕）暴露为 /outputs 供前端直连播放
 # 例如 /outputs/task_1/final.mp4
@@ -120,7 +135,7 @@ def mask_api_key(key: str) -> tuple[str, bool]:
 
 
 @app.get("/api/settings")
-async def get_settings():
+async def get_settings(token: str = Depends(require_token)):
     """获取当前配置（已在启动期与 DB 合并；密钥字段脱敏回显）"""
     text_masked, text_cfg = mask_api_key(settings.text_api_key)
     image_masked, image_cfg = mask_api_key(settings.image_api_key)
@@ -168,7 +183,7 @@ async def get_settings():
 
 
 @app.post("/api/settings")
-async def update_settings(data: dict):
+async def update_settings(data: dict, token: str = Depends(require_token)):
     """更新配置：落库 + 热更新内存中的 Pydantic 实例。
 
     修复点（vs 旧版）：
@@ -186,7 +201,7 @@ async def update_settings(data: dict):
 
 
 @app.post("/api/settings/reset")
-async def reset_settings_api():
+async def reset_settings_api(token: str = Depends(require_token)):
     """清空持久化配置，恢复 Pydantic 默认值。"""
     await reset_config_in_db()
     # 把内存中所有白名单字段恢复为默认值（仅对默认值常量有副本的字段；当前
@@ -205,7 +220,7 @@ async def reset_settings_api():
 
 
 @app.get("/api/queue/status")
-async def queue_status():
+async def queue_status(token: str = Depends(require_token)):
     """生产队列实时状态（手动观察：pending / running / done / failed 任务分桶）。
 
     用于排查"为什么没在跑"——某阶段是不是一直 pending 看 Task 产物是否齐
@@ -251,6 +266,7 @@ def _throttle_snapshot() -> dict:
 async def test_concurrency(
     type: str = Query(..., description="测试类型: text/image/video"),
     concurrency: int = Query(1, ge=1, le=10, description="并发数"),
+    token: str = Depends(require_token),
 ):
     """测试并发数：同时发 N 个请求并统计成功/失败/耗时。
 

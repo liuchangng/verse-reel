@@ -56,6 +56,17 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _ws_authorized(websocket: WebSocket) -> bool:
+    """WS token 校验（安全加固 REQ-S2）：query 参数 token 须等于 settings.app_token。
+
+    app_token 未配置（空）时一律拒绝（fail-closed）。
+    """
+    from app.config import settings
+    if not settings.app_token:
+        return False
+    return websocket.query_params.get("token", "") == settings.app_token
+
+
 @router.websocket("/progress/{task_id}")
 async def websocket_progress(websocket: WebSocket, task_id: int):
     """
@@ -63,6 +74,11 @@ async def websocket_progress(websocket: WebSocket, task_id: int):
     
     客户端连接后，服务器会定时推送任务进度更新
     """
+    if not _ws_authorized(websocket):
+        logger.warning("WS /progress/%s 拒绝：token 缺失或不匹配", task_id)
+        await websocket.close(code=4401)
+        return
+
     await manager.connect(websocket, task_id)
     
     try:
@@ -116,6 +132,11 @@ async def websocket_tasks(websocket: WebSocket):
     
     所有任务的状态变化都会推送给连接的客户端
     """
+    if not _ws_authorized(websocket):
+        logger.warning("WS /tasks 拒绝：token 缺失或不匹配")
+        await websocket.close(code=4401)
+        return
+
     await websocket.accept()
     
     try:

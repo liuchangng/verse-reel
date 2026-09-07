@@ -7,10 +7,16 @@ const apiClient = axios.create({
   timeout: 30000,
 })
 
+// 鉴权 token（安全加固 REQ-S2）：从 .env 的 VITE_APP_TOKEN 读取，与后端 APP_TOKEN 一致
+const AUTH_TOKEN = import.meta.env.VITE_APP_TOKEN || ''
+
 // 请求拦截器
 apiClient.interceptors.request.use(
   (config) => {
-    // 可以在这里添加 token 等
+    // 统一附加 Bearer Token（后端 require_token 校验，见 app/main.py）
+    if (AUTH_TOKEN) {
+      config.headers.Authorization = `Bearer ${AUTH_TOKEN}`
+    }
     return config
   },
   (error) => {
@@ -142,7 +148,9 @@ export const publishTask = async (id, platforms = ['douyin']) => {
 // WebSocket 连接
 export const createProgressWebSocket = (taskId, onMessage) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws/progress/${taskId}`
+  const token = import.meta.env.VITE_APP_TOKEN || ''
+  // 安全加固 REQ-S2：WS 需携带 token（后端校验 query_params["token"]）
+  const wsUrl = `${protocol}//${window.location.host}/ws/progress/${taskId}${token ? `?token=${encodeURIComponent(token)}` : ''}`
   
   let ws = null
   let reconnectAttempts = 0

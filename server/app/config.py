@@ -247,6 +247,12 @@ class Settings(BaseSettings):
     image_score_threshold: float = Field(default=7.0)
     max_retries: int = Field(default=3)
 
+    # ====== 鉴权配置（安全加固 REQ-S2）======
+    # 访问 /api/* 与 /ws/* 需携带 Authorization: Bearer <app_token>。
+    # 必须通过 .env 的 APP_TOKEN 注入；为空时受保护接口全部拒绝（fail-closed），
+    # 避免误开放。前端 VITE_APP_TOKEN 需与之一致。
+    app_token: str = Field(default="")
+
     # ====== 队列配置 ======
     # 消费者轮询间隔（秒）：扫描待办 Job 的频率
     queue_poll_interval: float = Field(default=2.0)
