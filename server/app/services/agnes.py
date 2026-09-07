@@ -252,8 +252,8 @@ class AgnesClient:
                     body = e.response.json()
                     if isinstance(body, dict) and body.get("error", {}).get("code") == "rate_limit_exceeded":
                         is_rate_limit = True
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("解析视频提交错误响应失败: %s", exc)
                 if is_rate_limit:
                     video_limiter.record_429()
                     if attempt < max_retries - 1:

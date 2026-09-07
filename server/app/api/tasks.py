@@ -1,7 +1,10 @@
 """任务管理 API"""
 import json
 import logging
+import os
+import shutil
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, BackgroundTasks, HTTPException
 from pydantic import BaseModel
@@ -17,6 +20,22 @@ from app.services.publisher import publisher_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _cleanup_task_output(task_id: int) -> None:
+    """删除任务产物目录 output/task_{id}（安全加固 REQ-S4.5）。
+
+    删除 DB 记录后调用，避免孤儿产物占盘；清理失败仅告警不阻塞接口。
+    """
+    from app.config import settings
+    out_dir = Path(getattr(settings, "output_dir", "") or "server/data/output")
+    task_dir = out_dir / f"task_{task_id}"
+    try:
+        if task_dir.is_dir():
+            shutil.rmtree(task_dir)
+            logger.info("已清理任务 %s 产物目录 %s", task_id, task_dir)
+    except Exception as exc:
+        logger.warning("清理任务 %s 产物目录失败 %s: %s", task_id, task_dir, exc)
 
 
 class BatchGenerateRequest(BaseModel):
@@ -49,16 +68,24 @@ async def list_tasks(
     query = query.offset(offset).limit(page_size).order_by(Task.id.desc())
     result = await db.execute(query)
     tasks = result.scalars().all()
-    
+
+    # 批量获取关联诗词（消除 N+1：一次 IN 查询建 map，替代循环内逐条 db.get）
+    poem_ids = {t.poem_id for t in tasks if t.poem_id}
+    poems_map: dict[int, Poem] = {}
+    if poem_ids:
+        pres = await db.execute(select(Poem).where(Poem.id.in_(poem_ids)))
+        poems_map = {p.id: p for p in pres.scalars().all()}
+
     # 获取关联的诗词信息
     items = []
     for task in tasks:
-        poem = await db.get(Poem, task.poem_id)
+        poem = poems_map.get(task.poem_id)
         # 基于实际数据推算状态
         _img_urls = []
         if task.image_urls:
             try: _img_urls = json.loads(task.image_urls)
-            except: pass
+            except Exception as exc:
+                logger.warning("任务 %s image_urls 解析失败: %s", task.id, exc)
         _script_done = bool(task.script and task.script_score)
         _image_done = bool(_img_urls) or (task.image_score is not None and task.image_score > 0)
         _video_done = bool(task.video_url)
@@ -304,8 +331,7 @@ async def start_task(
             try:
                 await pipeline_engine.run_pipeline(session, task_id)
             except Exception as e:
-                print(f"后台任务失败: {e}")
-    
+                logger.error(f"后台任务失败: {e}")
     background_tasks.add_task(run_in_background)
     
     return {
@@ -317,7 +343,7 @@ async def start_task(
 
 @router.delete("/{task_id}")
 async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
-    """删除任务"""
+    """删除任务（安全加固：删除记录后级联清理产物目录，避免孤儿文件占盘）"""
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -327,6 +353,8 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
     
     await db.delete(task)
     await db.commit()
+    # 级联清理产物目录（失败仅告警，不阻断删除成功返回）
+    _cleanup_task_output(task_id)
     
     return {"message": "任务已删除"}
 

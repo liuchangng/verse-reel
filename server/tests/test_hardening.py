@@ -89,3 +89,32 @@ class TestRateLimit:
         with TestClient(app) as client:
             r = client.get("/api/settings/test-concurrency?type=text&concurrency=1", headers=auth_headers)
             assert r.status_code == 429
+
+
+# ---------- REQ-S4 P1 质量项 ----------
+
+class TestDebugDefault:
+    def test_debug_default_false(self):
+        """debug 默认 False（不依赖运行时 .env，校验 Pydantic 字段默认）。"""
+        from app.config import Settings
+        assert Settings.model_fields["debug"].default is False
+
+
+class TestDeleteCleanup:
+    def test_cleanup_removes_task_dir(self, monkeypatch, tmp_path):
+        """删除任务后产物目录被清理（REQ-S4.5）。"""
+        from app.api.tasks import _cleanup_task_output
+        from app.config import settings
+        monkeypatch.setattr(settings, "output_dir", str(tmp_path))
+        d = tmp_path / "task_42"
+        d.mkdir()
+        (d / "final.mp4").write_text("x")
+        _cleanup_task_output(42)
+        assert not d.exists()
+
+    def test_cleanup_missing_dir_no_error(self, monkeypatch, tmp_path):
+        """产物目录不存在时清理不报错（无任务/已清理场景）。"""
+        from app.api.tasks import _cleanup_task_output
+        from app.config import settings
+        monkeypatch.setattr(settings, "output_dir", str(tmp_path))
+        _cleanup_task_output(999)  # 应静默通过

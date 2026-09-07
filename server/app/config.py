@@ -267,7 +267,8 @@ class Settings(BaseSettings):
     # 服务器配置
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
-    debug: bool = Field(default=True)
+    # 安全加固：默认关闭调试（SQL echo / 详细堆栈），需显式 DEBUG=true 开启
+    debug: bool = Field(default=False)
     # 对外可访问的基础 URL（用于把本地产物文件拼成前端可直连的绝对 URL）
     server_public_url: str = Field(default="http://localhost:8000")
     

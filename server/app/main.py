@@ -214,8 +214,8 @@ async def reset_settings_api(token: str = Depends(require_token)):
             field = settings.__class__.model_fields.get(key)
             if field is not None:
                 setattr(settings, key, field.default)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("重置设置 %s 失败: %s", key, exc)
     return {"message": "已恢复默认值", "settings": await get_settings()}
 
 

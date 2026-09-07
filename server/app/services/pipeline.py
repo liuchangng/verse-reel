@@ -892,8 +892,8 @@ class PipelineEngine:
             )
             if p.returncode == 0 and p.stdout.strip():
                 return float(p.stdout.strip())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("probe 时长失败 %s: %s", path, exc)
         return None
 
     async def _generate_tts_segments(
@@ -933,8 +933,8 @@ class PipelineEngine:
                 ):
                     logger.info(f"task{task.id} TTS 分段已存在，复用")
                     return await self._finalize_tts(task, existing, output_dir)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("task%s 复用 TTS 分镜校验失败: %s", task.id, exc)
         if not await tts_client.health_check():
             return {"success": False, "error": "TTS 服务未启动"}
         # edge-tts 单条耗时 15~57s 且偶发 "No audio was received"，并发过高易失败。
@@ -1146,8 +1146,8 @@ class PipelineEngine:
             )
             if p.returncode == 0 and p.stdout.strip():
                 return int(p.stdout.strip())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("probe 图片高度失败 %s: %s", src, exc)
         return None
 
     async def _apply_image_watermark(self, ff: str, src: Path, dst: Path) -> bool:
@@ -1902,8 +1902,8 @@ class PipelineEngine:
             task.subtitle_url = final_url
             try:
                 task.video_duration = round(out_total, 1)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("计算成片时长失败: %s", exc)
             logger.info(f"字幕烧录完成: {final_url} (时长 {out_total:.1f}s, bgm={bool(bgm)})")
             return final_url
         except Exception as e:
