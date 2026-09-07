@@ -260,10 +260,11 @@
               <input type="radio" v-model="publishPlatform" :value="p.id" />{{ p.icon }} {{ p.name }}
             </label>
           </div>
+          <p class="publish-warning">⚠️ 发布后视频将公开展示，此操作不可撤销，请确认产物与内容无误。</p>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" @click="showPublishModal = false">取消</button>
-          <button class="btn btn-primary" @click="confirmPublish">确认发布</button>
+          <button class="btn btn-primary" @click="confirmPublish">确认发布（不可撤销）</button>
         </div>
       </div>
     </div>
@@ -723,6 +724,7 @@ onUnmounted(() => cleanup())
 .platform-options { display: flex; gap: 12px; flex-wrap: wrap; }
 .platform-option { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 8px 12px; border: 1px solid var(--color-border); border-radius: var(--radius-md); transition: all .15s; }
 .platform-option:hover { border-color: var(--color-primary); background: var(--color-primary-bg); }
+.publish-warning { margin: 14px 0 0; padding: 10px 12px; font-size: 13px; color: var(--color-danger, #d93026); background: rgba(217, 48, 38, .08); border: 1px solid rgba(217, 48, 38, .25); border-radius: var(--radius-md); line-height: 1.5; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--color-border-light); }
 
 /* 按钮 */

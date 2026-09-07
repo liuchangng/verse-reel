@@ -136,10 +136,10 @@ export const regenerateTask = async (id, stage = 'script') => {
   return response
 }
 
-// 发布任务到平台
+// 发布任务到平台（安全加固：二次确认 confirm=YES，后端校验，否则 400）
 export const publishTask = async (id, platforms = ['douyin']) => {
   const response = await apiClient.post(`/tasks/${id}/publish`, null, {
-    params: { platforms },
+    params: { platforms, confirm: 'YES' },
     paramsSerializer: { indices: false },
   })
   return response
