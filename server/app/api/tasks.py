@@ -177,7 +177,6 @@ async def clear_all_tasks(
     if not await api_limiter_destructive.acquire(timeout=0):
         raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
 
-    import os, shutil
     from sqlalchemy import text
 
     # 1. 统计即将清除的数据
