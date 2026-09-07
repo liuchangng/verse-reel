@@ -33,7 +33,8 @@
         <div class="model-fields">
           <div class="form-item">
             <div class="form-label">API Key</div>
-            <input class="form-input" type="password" v-model="settings.text_api_key" placeholder="sk-..." />
+            <input class="form-input" type="password" v-model="settings.text_api_key"
+                   :placeholder="keyConfigured.text ? '已配置，留空则不修改' : '未配置，请输入密钥 sk-...'" />
           </div>
           <div class="form-item">
             <div class="form-label">Base URL</div>
@@ -78,7 +79,8 @@
         <div class="model-fields">
           <div class="form-item">
             <div class="form-label">API Key</div>
-            <input class="form-input" type="password" v-model="settings.image_api_key" placeholder="sk-..." />
+            <input class="form-input" type="password" v-model="settings.image_api_key"
+                   :placeholder="keyConfigured.image ? '已配置，留空则不修改' : '未配置，请输入密钥 sk-...'" />
           </div>
           <div class="form-item">
             <div class="form-label">Base URL</div>
@@ -124,7 +126,8 @@
         <div class="model-fields">
           <div class="form-item">
             <div class="form-label">API Key</div>
-            <input class="form-input" type="password" v-model="settings.video_api_key" placeholder="sk-..." />
+            <input class="form-input" type="password" v-model="settings.video_api_key"
+                   :placeholder="keyConfigured.video ? '已配置，留空则不修改' : '未配置，请输入密钥 sk-...'" />
           </div>
           <div class="form-item">
             <div class="form-label">Base URL</div>
@@ -323,23 +326,26 @@
 <script setup>
 import { reactive, ref, onMounted } from 'vue'
 
-const DEFAULT_API_KEY = 'sk-AOzSrTPz1GNuZR3XxJcEmhloPkvUAsMCZUWcUExotFdjOrAN'
 const DEFAULT_BASE_URL = 'https://api.agnes-ai.cn/v1'
+
+// 密钥配置状态（安全加固：密钥不再硬编码/明文回显，只显示"是否已配置"标记）
+const keyConfigured = reactive({ text: false, image: false, video: false })
+const KEY_FIELDS = ['text_api_key', 'image_api_key', 'video_api_key']
 
 // 设置数据（默认与后端 Pydantic 默认一致，启动后会被服务器返回覆盖）
 const settings = reactive({
-  // 文本
-  text_api_key: DEFAULT_API_KEY,
+  // 文本（密钥默认空，由 .env/设置页配置；不回显明文）
+  text_api_key: '',
   text_base_url: DEFAULT_BASE_URL,
   text_model: 'agnes-2.5-flash',
   text_concurrency: 5,
   // 图片
-  image_api_key: DEFAULT_API_KEY,
+  image_api_key: '',
   image_base_url: DEFAULT_BASE_URL,
   image_model: 'agnes-image-2.1-flash',
   image_concurrency: 3,
   // 视频
-  video_api_key: DEFAULT_API_KEY,
+  video_api_key: '',
   video_base_url: DEFAULT_BASE_URL,
   video_model: 'agnes-video-v2.0',
   video_concurrency: 1,
@@ -393,8 +399,13 @@ const loadSettings = async () => {
     if (!resp.ok) throw new Error('HTTP ' + resp.status)
     const data = await resp.json()
     Object.entries(data).forEach(([k, v]) => {
-      if (k in settings) settings[k] = v
+      // 密钥字段不回显明文（后端只给脱敏值 + configured 标记），避免脱敏值被当真实 key 保存
+      if (k in settings && !k.endsWith('_api_key')) settings[k] = v
     })
+    // 密钥配置状态标记
+    keyConfigured.text = !!data.text_api_key_configured
+    keyConfigured.image = !!data.image_api_key_configured
+    keyConfigured.video = !!data.video_api_key_configured
     // 后端字段名映射：script_score_threshold → min_script_score, image_score_threshold → min_image_score
     if ('script_score_threshold' in data) settings.min_script_score = data.script_score_threshold
     if ('image_score_threshold' in data) settings.min_image_score = data.image_score_threshold
@@ -408,6 +419,12 @@ const saveSettings = async () => {
   saving.value = true
   // 构造后端期望的字段名映射
   const payload = { ...settings }
+  // 密钥保护：输入框未填写新值（空 / 残留脱敏值）时不提交该字段，
+  // 避免空串或 sk-**** 覆盖后端已配置的真实 key
+  KEY_FIELDS.forEach((k) => {
+    const v = payload[k]
+    if (!v || v.includes('****')) delete payload[k]
+  })
   payload.script_score_threshold = settings.min_script_score
   payload.image_score_threshold = settings.min_image_score
   delete payload.min_script_score

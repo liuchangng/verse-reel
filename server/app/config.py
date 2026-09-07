@@ -123,19 +123,21 @@ class Settings(BaseSettings):
     """应用配置"""
     
     # ====== 文本模型配置 ======
-    text_api_key: str = Field(default="sk-AOzSrTPz1GNuZR3XxJcEmhloPkvUAsMCZUWcUExotFdjOrAN")
+    # ⚠️ 密钥已从代码移除（安全加固）：必须通过 .env 的 text_api_key 注入，
+    # 未配置时置空并在调用外部 API 处给出清晰提示（见 main.py mask_api_key）。
+    text_api_key: str = Field(default="")
     text_base_url: str = Field(default="https://api.agnes-ai.cn/v1")
     text_model: str = Field(default="agnes-2.5-flash")
     text_concurrency: int = Field(default=5)
     
     # ====== 图片模型配置 ======
-    image_api_key: str = Field(default="sk-AOzSrTPz1GNuZR3XxJcEmhloPkvUAsMCZUWcUExotFdjOrAN")
+    image_api_key: str = Field(default="")
     image_base_url: str = Field(default="https://api.agnes-ai.cn/v1")
     image_model: str = Field(default="agnes-image-2.1-flash")
     image_concurrency: int = Field(default=5)
     
     # ====== 视频模型配置 ======
-    video_api_key: str = Field(default="sk-AOzSrTPz1GNuZR3XxJcEmhloPkvUAsMCZUWcUExotFdjOrAN")
+    video_api_key: str = Field(default="")
     video_base_url: str = Field(default="https://api.agnes-ai.cn/v1")
     video_model: str = Field(default="agnes-video-v2.0")
     # agnes 视频硬限流 1 次/分钟，必须串行（并发 1）

@@ -106,22 +106,41 @@ async def health():
     return {"status": "healthy"}
 
 
+def mask_api_key(key: str) -> tuple[str, bool]:
+    """对 API 密钥脱敏回显（安全加固 REQ-S1）。
+
+    返回 (脱敏字符串, 是否已配置)。空 → ("", False)；短 key(≤8) 只留首字符；
+    正常 key 保留前 5 + 尾 4，中段以 **** 遮蔽，避免明文泄露到前端。
+    """
+    if not key:
+        return "", False
+    if len(key) <= 8:
+        return f"{key[:1]}****", True
+    return f"{key[:5]}****{key[-4:]}", True
+
+
 @app.get("/api/settings")
 async def get_settings():
-    """获取当前配置（已在启动期与 DB 合并）"""
+    """获取当前配置（已在启动期与 DB 合并；密钥字段脱敏回显）"""
+    text_masked, text_cfg = mask_api_key(settings.text_api_key)
+    image_masked, image_cfg = mask_api_key(settings.image_api_key)
+    video_masked, video_cfg = mask_api_key(settings.video_api_key)
     return {
-        # 文本模型
-        "text_api_key": settings.text_api_key,
+        # 文本模型（密钥脱敏：不回显明文，仅给 configured 标记）
+        "text_api_key": text_masked,
+        "text_api_key_configured": text_cfg,
         "text_base_url": settings.text_base_url,
         "text_model": settings.text_model,
         "text_concurrency": settings.text_concurrency,
         # 图片模型
-        "image_api_key": settings.image_api_key,
+        "image_api_key": image_masked,
+        "image_api_key_configured": image_cfg,
         "image_base_url": settings.image_base_url,
         "image_model": settings.image_model,
         "image_concurrency": settings.image_concurrency,
         # 视频模型
-        "video_api_key": settings.video_api_key,
+        "video_api_key": video_masked,
+        "video_api_key_configured": video_cfg,
         "video_base_url": settings.video_base_url,
         "video_model": settings.video_model,
         "video_concurrency": settings.video_concurrency,
