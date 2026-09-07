@@ -345,6 +345,79 @@ class TestDiverseTopK:
         authors = [p.author for p, _ in result]
         assert len(set(authors)) == len(authors), f"作者刷屏: {authors}"
 
+    def test_targeted_hotspot_picks_target_poem(self):
+        """AC1 定向热点命中目标：同 A 桶内连续相关性决胜，名望不压过主题。
+
+        复现问题：苏轼《定风波》走红 → 兜底 Top1 是《送张五归山》王维（名望分压过）。
+        构造：王维《登高》标题命中经典词牌 bonus → score 更高；但苏轼《定风波》rel 更高。
+        修复后：rel=1.0 的苏轼《定风波》应压过 rel=0.95 的王维（即使王维 score 更高）。
+        """
+        def rel_fn(p):
+            return {1: 1.0, 2: 0.95}[p.id]  # id=1 苏轼定风波（池序最前），id=2 王维
+        cands = [
+            PoemLike(id=1, title="定风波", author="苏轼", dynasty="北宋", content="莫听穿林打叶声何妨吟啸且徐行"),
+            PoemLike(id=2, title="登高", author="王维", dynasty="盛唐", content="短诗"),  # 登高→classic+0.15
+        ]
+        ft = {"苏轼": (100.0, "normal"), "王维": (100.0, "normal")}
+        result = diverse_top_k(cands, title="苏轼《定风波》走红", fame_table=ft,
+                               relevance_fn=rel_fn, top_k=3)
+        assert result and result[0][0].id == 1, \
+            f"定向热点 Top1 应为目标诗《定风波》(id=1)，实际 {[(p.id, p.author) for p, _ in result]}"
+
+    def test_tier1_does_not_force_quota_slot(self):
+        """AC2 异朝代不挤占：B/X 桶仅 tier-1（无 tier-2）候选时，配额释放给 A 桶。
+
+        复现问题：默认配额 A:1/B:1/X:1 把 B/X 桶的 tier-1 无关诗强塞进 Top-K。
+        修复后：配额阶段仅接受 tier-2；B/X 无 tier-2 → 缺额由 A 桶 tier-2 补位。
+        """
+        def rel_fn(p):
+            return {1: 1.0, 2: 0.95, 3: 0.90, 4: 0.75, 5: 0.70}[p.id]
+        cands = [
+            PoemLike(id=1, author="苏轼", dynasty="北宋", content="短"),
+            PoemLike(id=2, author="李白", dynasty="唐", content="短"),
+            PoemLike(id=3, author="杜甫", dynasty="唐", content="短"),
+            PoemLike(id=4, author="明人", dynasty="明", content="短"),   # B 桶 tier-1
+            PoemLike(id=5, author="当代甲", dynasty="当代", content="短"),  # X 桶 tier-1
+        ]
+        result = diverse_top_k(cands, title="苏轼《定风波》走红", relevance_fn=rel_fn, top_k=3)
+        picked_ids = [p.id for p, _ in result]
+        assert 4 not in picked_ids and 5 not in picked_ids, \
+            f"tier-1 无关诗不应强占配额: {picked_ids}"
+        assert picked_ids == [1, 2, 3], f"Top3 应全为 A 桶相关诗: {picked_ids}"
+
+    def test_diversity_kept_when_tier2_present(self):
+        """AC3 宽泛热点保多样性：B/X 桶存在 tier-2 候选时，配额仍覆盖跨朝代。"""
+        from app.services.recommend_scoring import diverse_top_k, dynasty_bucket
+
+        def rel_fn(p):
+            return {1: 1.0, 2: 0.95, 3: 0.90}[p.id]
+        cands = [
+            PoemLike(id=1, author="苏轼", dynasty="北宋", content="短"),   # A 桶 tier-2
+            PoemLike(id=2, author="于谦", dynasty="明", content="短"),     # B 桶 tier-2
+            PoemLike(id=3, author="当代甲", dynasty="当代", content="短"),  # X 桶 tier-2
+        ]
+        result = diverse_top_k(cands, title="中秋月圆夜", relevance_fn=rel_fn, top_k=3)
+        buckets = [dynasty_bucket(p.dynasty, p.author) for p, _ in result]
+        assert "A_top_classical" in buckets and "B_mid_classical" in buckets, \
+            f"跨朝代多样性应保留: {buckets}"
+
+    def test_relevance_continuous_beats_fame_same_tier(self):
+        """AC4 名望退居 tie-break：同档位内连续 rel 决胜，rel 相同才名望决胜。
+
+        id=1 rel=1.0（低名望）应胜 id=2 rel=0.95（高名望）——rel 差异优先于名望分。
+        """
+        def rel_fn(p):
+            return {1: 1.0, 2: 0.95}[p.id]
+        cands = [
+            PoemLike(id=1, author="二流唐人", dynasty="唐", content="短"),
+            PoemLike(id=2, author="唐代名家", dynasty="唐", content="短"),
+        ]
+        ft = {"二流唐人": (10.0, "normal"), "唐代名家": (95.0, "normal")}
+        result = diverse_top_k(cands, title="秋日", fame_table=ft,
+                               relevance_fn=rel_fn, top_k=1)
+        assert result and result[0][0].id == 1, \
+            f"同档内高 rel 低名望应胜: {[(p.id, p.author) for p, _ in result]}"
+
 
 class TestFameIntegration:
     """§8 接入：poets.fame_score → 作者权威权重 + 伪作者硬过滤。

@@ -408,8 +408,10 @@ def dynasty_bucket(dynasty: str | None, author: str | None = "") -> str:
 
 
 # ===== 8. 多样性策略 =====
-# 多样性配额：默认 Top-3 覆盖 A+B+X（古代正宗 + 明清优秀 + 兜底）
-# bucket 内按 score 排序取 Top-1；不足时顺序 fallback。
+# 多样性配额（方案 D：语义为"上限"而非"强制占用"）：
+#   默认 Top-3 覆盖 A+B+X（古代正宗 + 明清优秀 + 兜底）；配额阶段仅 tier-2 占位，
+#   某桶无 tier-2 时缺额释放给其他相关桶（见 diverse_top_k R2 注释）。
+# bucket 内按 (-tier, -rel, -score) 排序取 Top-1；不足时顺序 fallback（tier-1 在此补位）。
 DEFAULT_BUCKET_QUOTA = {"A_top_classical": 1, "B_mid_classical": 1, "X_fallback": 1, "C_mixed_late": 0, "D_modern_whitelist": 0}
 
 # 配额顺序：A → B → D → C → X
@@ -460,17 +462,27 @@ def diverse_top_k(
                        prest_table=prest_table, fame_table=fame_table)
         b = dynasty_bucket(p.dynasty, p.author)
         buckets.setdefault(b, []).append((p, sc, rel))
-    # 每个 bucket 内：先按相关性档位分层，档内再按 score（名望）降序。
-    # 2026-09-04 方案 B：名望降级为 tie-breaker，避免"名家无关诗"（如《李监宅》杜甫）
-    # 压过主题更契合的候选。兜底仍在：桶内若无高/中相关项，取该桶 tier 0 的名家作品。
+    # 每个 bucket 内：先按相关性档位分层，再按连续相关性决胜，最后名望分 tie-break。
+    # 2026-09-04 方案 B：名望降级为档内 tie-breaker，避免"名家无关诗"（如《李监宅》杜甫）
+    # 压过主题更契合的候选。
+    # 2026-09-07 方案 D-R1：决胜链再降一档——(-tier, -rel, -score)，连续相关性(rel)优
+    # 先于名望分。复现发现同档内 score(名望×朝代×经典)仍能压过主题：王维《送张五归山》
+    # (fame100×盛唐×短诗≈1.9)在"苏轼《定风波》走红"等所有热点 Top1 胜出。rel 是候选池
+    # 索引位置代理（池序=精确词命中序），比名望更贴近热点主题，故提为决胜键。
+    # 兜底仍在：桶内若无高/中相关项，取该桶 tier 0 的名家作品由 fallback 阶段承接。
     for b in buckets.values():
-        b.sort(key=lambda x: (-relevance_tier(x[2]), -x[1]))
+        b.sort(key=lambda x: (-relevance_tier(x[2]), -x[2], -x[1]))
 
     # 2) 按配额取：先按预定 bucket 顺序分配，缺额按 fallback 顺序补齐
     #    同 bucket 内同作者只取一次（防止高产作者刷屏）
     #    2026-09-04 方案 B 延伸：tier-0（不相关，池中靠后）候选不占保底配额、
     #    也不在兜底时抢位——避免"硬性朝代配额"把无关唐宋诗（如《李监宅》杜甫）
-    #    保送进 Top1。若某 bucket 无 tier≥1 候选，该桶配额自然释放给其他相关桶。
+    #    保送进 Top1。
+    #    2026-09-07 方案 D-R2：配额阶段仅接受 tier-2（rel≥0.9）候选——朝代桶配额
+    #    语义从"强制占用"变"上限占用"：某桶只有 tier-1（rel 0.7~0.9）候选时不再强占
+    #    席位，缺额释放给其他相关桶；tier-1 仅在全局缺额时经 fallback 阶段补位。
+    #    → 定向热点（苏轼《定风波》走红）B/X 桶无关诗不硬挤；宽泛热点各桶 tier-2
+    #      自然占位，朝代多样性保留。
     picked: list[tuple[PoemLike, float]] = []
     picked_ids: set[int] = set()
     seen_authors: set[str] = set()
@@ -481,8 +493,8 @@ def diverse_top_k(
         for p, sc, _rel in buckets.get(b, []):
             if added >= want:
                 break
-            if relevance_tier(_rel) == 0:
-                continue  # tier-0 不相关：跳过，不占保底配额（继续找 tier≥1 填槽）
+            if relevance_tier(_rel) < 2:
+                continue  # 方案D-R2：配额阶段仅 tier-2 占位；tier-1 留待 fallback 补位
             if p.id in picked_ids:
                 continue
             if p.author and p.author in seen_authors:
@@ -492,7 +504,9 @@ def diverse_top_k(
             if p.author:
                 seen_authors.add(p.author)
             added += 1
-    # Fallback 阶段（补到 top_k，仍按 bucket 顺序；同样跳过 tier-0）
+    # Fallback 阶段（补到 top_k，仍按 bucket 顺序；跳过 tier-0）
+    # 方案 D-R2：tier-1（rel 0.7~0.9）候选在此补位——配额阶段不占位的桶，仅当
+    # 全局 tier-2 不足 top_k 时，才由 tier-1 经 fallback 填充，保证不空池也不强占。
     for b in _BUCKET_ORDER:
         if len(picked) >= top_k:
             break

@@ -102,3 +102,45 @@ class TestRecommendPoems:
         # 兜底：返回规则 Top-3 且有 match_reason
         assert len(result) >= 1
         assert result[0]["match_reason"].startswith("主题词命中")
+
+    @pytest.mark.asyncio
+    async def test_candidates_reordered_to_recall_order(self, monkeypatch):
+        """方案D守护：WHERE id IN 返回主键序（乱序）时，recommend_poems 重排回召回序。
+
+        复现问题：_rule_candidates 返回召回序 [1,2]，但 SQLite IN 查询按主键序返回
+        [2,1] → _rule_top_by_score 的 rel（池序代理）失真，主键小的无关诗被当池首。
+        修复后：candidates 按召回序重排，传给 _llm_select 的顺序应为 [1,2]。
+        """
+        seen = {}
+
+        async def fake_rule(db, keywords, limit=200):
+            return [1, 2]  # 召回序：id=1 主题命中更前
+
+        async def fake_llm(candidates, hotspot):
+            seen["order"] = [c["id"] for c in candidates]
+            return []  # 空 → 触发兜底路径（同样依赖召回序）
+
+        class FakeDb:
+            async def execute(self, stmt):
+                def mk(pid):
+                    return type("P", (), {"id": pid, "title": f"t{pid}",
+                                          "author": "甲", "dynasty": "唐",
+                                          "content": "x" * 30})()
+                # 模拟 SQLite IN 主键序：返回 [2, 1]（乱序）
+                class _S:
+                    def all(self):
+                        return [mk(2), mk(1)]
+                return type("R", (), {"scalars": lambda self: _S()})()
+
+        monkeypatch.setattr(hotspot.hotspot_service, "_rule_candidates", fake_rule)
+        monkeypatch.setattr(hotspot.hotspot_service, "_llm_select", fake_llm)
+        async def fake_prest3(db):
+            return {"甲": 100}
+        monkeypatch.setattr(hotspot, "_get_prestige_table", fake_prest3)
+        async def fake_fame(db):
+            return {}
+        monkeypatch.setattr(hotspot, "_get_fame_table", fake_fame)
+
+        await hotspot.hotspot_service.recommend_poems(FakeDb(), {"title": "某热点", "hot": 1})
+        assert seen.get("order") == [1, 2], \
+            f"candidates 应按召回序 [1,2] 传给 LLM/兜底，实际 {seen.get('order')}"

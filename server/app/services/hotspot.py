@@ -985,6 +985,13 @@ class HotspotService:
                 stmt = select(Poem).where(Poem.id.in_(candidate_ids))
                 result = await db.execute(stmt)
                 poems = result.scalars().all()
+                # 2026-09-07 方案D修复：WHERE id IN 按主键序返回（乱序），
+                # 需按 _rule_candidates 召回序（精确词/golden 命中序）重排——
+                # 否则 _rule_top_by_score 的 rel（池序代理）失真：主键小的无关诗
+                # 会被当成"池首高相关"霸占 Top1（复现：所有热点 Top1 均为《送吴悦游韶阳》）。
+                # 顺带收益：_llm_select 输入顺序也变为召回序，更贴近主题。
+                by_id = {p.id: p for p in poems}
+                poems = [by_id[pid] for pid in candidate_ids if pid in by_id]
                 candidates = [
                     {
                         "id": p.id, "title": p.title, "author": p.author,
