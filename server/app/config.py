@@ -123,19 +123,21 @@ class Settings(BaseSettings):
     """应用配置"""
     
     # ====== 文本模型配置 ======
-    text_api_key: str = Field(default="sk-AOzSrTPz1GNuZR3XxJcEmhloPkvUAsMCZUWcUExotFdjOrAN")
+    # ⚠️ 密钥已从代码移除（安全加固）：必须通过 .env 的 text_api_key 注入，
+    # 未配置时置空并在调用外部 API 处给出清晰提示（见 main.py mask_api_key）。
+    text_api_key: str = Field(default="")
     text_base_url: str = Field(default="https://api.agnes-ai.cn/v1")
     text_model: str = Field(default="agnes-2.5-flash")
     text_concurrency: int = Field(default=5)
     
     # ====== 图片模型配置 ======
-    image_api_key: str = Field(default="sk-AOzSrTPz1GNuZR3XxJcEmhloPkvUAsMCZUWcUExotFdjOrAN")
+    image_api_key: str = Field(default="")
     image_base_url: str = Field(default="https://api.agnes-ai.cn/v1")
     image_model: str = Field(default="agnes-image-2.1-flash")
     image_concurrency: int = Field(default=5)
     
     # ====== 视频模型配置 ======
-    video_api_key: str = Field(default="sk-AOzSrTPz1GNuZR3XxJcEmhloPkvUAsMCZUWcUExotFdjOrAN")
+    video_api_key: str = Field(default="")
     video_base_url: str = Field(default="https://api.agnes-ai.cn/v1")
     video_model: str = Field(default="agnes-video-v2.0")
     # agnes 视频硬限流 1 次/分钟，必须串行（并发 1）
@@ -245,6 +247,12 @@ class Settings(BaseSettings):
     image_score_threshold: float = Field(default=7.0)
     max_retries: int = Field(default=3)
 
+    # ====== 鉴权配置（安全加固 REQ-S2）======
+    # 访问 /api/* 与 /ws/* 需携带 Authorization: Bearer <app_token>。
+    # 必须通过 .env 的 APP_TOKEN 注入；为空时受保护接口全部拒绝（fail-closed），
+    # 避免误开放。前端 VITE_APP_TOKEN 需与之一致。
+    app_token: str = Field(default="")
+
     # ====== 队列配置 ======
     # 消费者轮询间隔（秒）：扫描待办 Job 的频率
     queue_poll_interval: float = Field(default=2.0)
@@ -259,7 +267,8 @@ class Settings(BaseSettings):
     # 服务器配置
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
-    debug: bool = Field(default=True)
+    # 安全加固：默认关闭调试（SQL echo / 详细堆栈），需显式 DEBUG=true 开启
+    debug: bool = Field(default=False)
     # 对外可访问的基础 URL（用于把本地产物文件拼成前端可直连的绝对 URL）
     server_public_url: str = Field(default="http://localhost:8000")
     

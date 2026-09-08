@@ -2,9 +2,10 @@
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Dict, Set
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from app.database import async_session_factory
 from app.models.task import Task
@@ -56,6 +57,21 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _ws_authorized(websocket: WebSocket) -> bool:
+    """WS token 校验（安全加固 REQ-S2；review MINOR-1 常量时间比较）。
+
+    query 参数 token 须等于 settings.app_token；
+    app_token 未配置（空）时一律拒绝（fail-closed）。
+    """
+    import secrets
+
+    from app.config import settings
+    if not settings.app_token:
+        return False
+    token = websocket.query_params.get("token", "")
+    return bool(token) and secrets.compare_digest(token, settings.app_token)
+
+
 @router.websocket("/progress/{task_id}")
 async def websocket_progress(websocket: WebSocket, task_id: int):
     """
@@ -63,6 +79,11 @@ async def websocket_progress(websocket: WebSocket, task_id: int):
     
     客户端连接后，服务器会定时推送任务进度更新
     """
+    if not _ws_authorized(websocket):
+        logger.warning("WS /progress/%s 拒绝：token 缺失或不匹配", task_id)
+        await websocket.close(code=4401)
+        return
+
     await manager.connect(websocket, task_id)
     
     try:
@@ -84,7 +105,8 @@ async def websocket_progress(websocket: WebSocket, task_id: int):
                     img_urls = None
                     if task.image_urls:
                         try: img_urls = json.loads(task.image_urls)
-                        except: pass
+                        except Exception as exc:
+                            logger.warning("任务 %s image_urls 解析失败: %s", task_id, exc)
 
                     await manager.send_progress(task_id, {
                         "type": "progress",
@@ -116,27 +138,47 @@ async def websocket_tasks(websocket: WebSocket):
     
     所有任务的状态变化都会推送给连接的客户端
     """
+    if not _ws_authorized(websocket):
+        logger.warning("WS /tasks 拒绝：token 缺失或不匹配")
+        await websocket.close(code=4401)
+        return
+
     await websocket.accept()
     
+    # 增量推送游标（REQ-S4.3）：首轮全量，之后只推 updated_at 之后 / 新增 id 的变更，
+    # 避免每 2 秒全表扫描 + 全量下发
+    last_seen: datetime | None = None
+    last_max_id: int = 0
+
     try:
         while True:
-            # 查询所有任务状态
+            # 查询（增量条件）任务状态
             async with async_session_factory() as session:
-                result = await session.execute(select(Task))
+                query = select(Task)
+                if last_seen is not None:
+                    query = query.where(or_(Task.updated_at > last_seen, Task.id > last_max_id))
+                result = await session.execute(query)
                 tasks = result.scalars().all()
-                
-                await websocket.send_json({
-                    "type": "tasks_update",
-                    "tasks": [
-                        {
-                            "id": task.id,
-                            "status": task.status,
-                            "current_stage": task.current_stage,
-                            "progress": task.progress,
-                        }
-                        for task in tasks
-                    ]
-                })
+                if tasks:
+                    await websocket.send_json({
+                        "type": "tasks_update",
+                        "tasks": [
+                            {
+                                "id": task.id,
+                                "status": task.status,
+                                "current_stage": task.current_stage,
+                                "progress": task.progress,
+                            }
+                            for task in tasks
+                        ]
+                    })
+                    # 推进游标：id 取本轮最大；时间取本轮最新 updated_at（无则保留现值）
+                    last_max_id = max(last_max_id, max(t.id for t in tasks))
+                    ts = [t.updated_at for t in tasks if t.updated_at]
+                    if ts:
+                        last_seen = max(ts)
+                    if last_seen is None:
+                        last_seen = datetime.now()
             
             # 每2秒推送一次
             await asyncio.sleep(2)

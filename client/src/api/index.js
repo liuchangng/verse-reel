@@ -7,10 +7,16 @@ const apiClient = axios.create({
   timeout: 30000,
 })
 
+// 鉴权 token（安全加固 REQ-S2）：从 .env 的 VITE_APP_TOKEN 读取，与后端 APP_TOKEN 一致
+const AUTH_TOKEN = import.meta.env.VITE_APP_TOKEN || ''
+
 // 请求拦截器
 apiClient.interceptors.request.use(
   (config) => {
-    // 可以在这里添加 token 等
+    // 统一附加 Bearer Token（后端 require_token 校验，见 app/main.py）
+    if (AUTH_TOKEN) {
+      config.headers.Authorization = `Bearer ${AUTH_TOKEN}`
+    }
     return config
   },
   (error) => {
@@ -130,19 +136,38 @@ export const regenerateTask = async (id, stage = 'script') => {
   return response
 }
 
-// 发布任务到平台
+// 发布任务到平台（安全加固：二次确认 confirm=YES，后端校验，否则 400）
 export const publishTask = async (id, platforms = ['douyin']) => {
   const response = await apiClient.post(`/tasks/${id}/publish`, null, {
-    params: { platforms },
+    params: { platforms, confirm: 'YES' },
     paramsSerializer: { indices: false },
   })
   return response
 }
 
 // WebSocket 连接
+// 产物 URL 追加 token（review IMPORTANT-1 配套）：
+// 浏览器 <video>/<img>/window.open 的媒体请求无法携带 Authorization 头，
+// 后端 /outputs 额外接受 ?token= 查询参数（与 WS 同模式）。
+export const withOutputToken = (url) => {
+  if (!url) return url
+  try {
+    const u = new URL(url, window.location.origin)
+    if (!u.pathname.startsWith('/outputs/')) return url
+    if (u.searchParams.get('token')) return url
+    const token = import.meta.env.VITE_APP_TOKEN || ''
+    if (token) u.searchParams.set('token', token)
+    return u.toString()
+  } catch (e) {
+    return url
+  }
+}
+
 export const createProgressWebSocket = (taskId, onMessage) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws/progress/${taskId}`
+  const token = import.meta.env.VITE_APP_TOKEN || ''
+  // 安全加固 REQ-S2：WS 需携带 token（后端校验 query_params["token"]）
+  const wsUrl = `${protocol}//${window.location.host}/ws/progress/${taskId}${token ? `?token=${encodeURIComponent(token)}` : ''}`
   
   let ws = null
   let reconnectAttempts = 0
