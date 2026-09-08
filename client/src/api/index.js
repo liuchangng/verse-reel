@@ -146,6 +146,23 @@ export const publishTask = async (id, platforms = ['douyin']) => {
 }
 
 // WebSocket 连接
+// 产物 URL 追加 token（review IMPORTANT-1 配套）：
+// 浏览器 <video>/<img>/window.open 的媒体请求无法携带 Authorization 头，
+// 后端 /outputs 额外接受 ?token= 查询参数（与 WS 同模式）。
+export const withOutputToken = (url) => {
+  if (!url) return url
+  try {
+    const u = new URL(url, window.location.origin)
+    if (!u.pathname.startsWith('/outputs/')) return url
+    if (u.searchParams.get('token')) return url
+    const token = import.meta.env.VITE_APP_TOKEN || ''
+    if (token) u.searchParams.set('token', token)
+    return u.toString()
+  } catch (e) {
+    return url
+  }
+}
+
 export const createProgressWebSocket = (taskId, onMessage) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const token = import.meta.env.VITE_APP_TOKEN || ''

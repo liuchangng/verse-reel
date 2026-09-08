@@ -147,10 +147,10 @@
           class="sb-card"
           v-for="idx in Math.min(task.storyboard.length, task.image_urls.length)"
           :key="idx - 1"
-          @click="previewImage(task.image_urls[idx - 1])"
+          @click="previewImage(withOutputToken(task.image_urls[idx - 1]))"
         >
           <div class="sb-card-imgwrap">
-            <img class="sb-card-img" :src="task.image_urls[idx-1]" :alt="`分镜 ${idx}`" loading="lazy" />
+            <img class="sb-card-img" :src="withOutputToken(task.image_urls[idx-1])" :alt="`分镜 ${idx}`" loading="lazy" />
             <span class="sb-card-num">{{ idx }}</span>
             <span class="sb-card-cam" v-if="task.storyboard[idx-1] && task.storyboard[idx-1].camera">🎥 {{ task.storyboard[idx-1].camera }}</span>
             <div class="sb-card-prompt">{{ (task.storyboard[idx-1] && task.storyboard[idx-1].description) || '...' }}</div>
@@ -166,7 +166,7 @@
         <span class="anchor-badge"><i></i> 角色锚点已锁定</span>
       </div>
       <div class="character-ref-wrap">
-        <img class="character-ref-img" :src="task.character_ref" alt="角色定妆照" loading="lazy" @click="previewImage(task.character_ref)" />
+        <img class="character-ref-img" :src="withOutputToken(task.character_ref)" alt="角色定妆照" loading="lazy" @click="previewImage(withOutputToken(task.character_ref))" />
         <div class="character-ref-side">
           <div class="character-ref-note">6 张分镜图均以此图为 i2i 参考、并以下方特征锚点注入提示词，保证同一人物跨帧一致（参考 LocalMiniDrama / ArcReel 定妆照 + 参考图注入做法）。</div>
           <div class="anchor-anchors" v-if="task.character_description">
@@ -188,9 +188,9 @@
           class="gallery-item"
           v-for="(url, idx) in task.image_urls"
           :key="idx"
-          @click="previewImage(url)"
+          @click="previewImage(withOutputToken(url))"
         >
-          <img :src="url" :alt="`生成图片 ${idx+1}`" loading="lazy" />
+          <img :src="withOutputToken(url)" :alt="`生成图片 ${idx+1}`" loading="lazy" />
           <div class="gallery-caption">
             <span>#{{ idx + 1 }}</span>
             <span v-if="task.storyboard && task.storyboard[idx]">{{ task.storyboard[idx].description }}</span>
@@ -274,7 +274,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import api from '../api'
+import api, { withOutputToken } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -417,12 +417,12 @@ const videoGroupsByRatio = computed(() => {
   return Array.from(groups.values()).map(g => ({
     ratio: g.ratio,
     label: g.platforms.join('/'),
-    url: g.url,
+    url: withOutputToken(g.url),
   }))
 })
 
 // ====== 操作 ======
-const exportVideo = () => task.value.video_url ? window.open(task.value.video_url) : alert('视频尚未生成')
+const exportVideo = () => task.value.video_url ? window.open(withOutputToken(task.value.video_url)) : alert('视频尚未生成')
 const previewImage = (url) => window.open(url, '_blank')
 
 // 审核相关

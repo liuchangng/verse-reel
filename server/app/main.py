@@ -7,8 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, Header, Depends
 from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-
+from fastapi.responses import FileResponse
 from app.config import settings
 from app.database import init_db
 from app.services.settings_store import (
@@ -99,10 +98,47 @@ app.include_router(tts.router, prefix="/api/tts", tags=["TTS"], dependencies=[De
 # WebSocket 不走 HTTP 依赖，token 在 ws.py 端内校验（query_params["token"]）
 app.include_router(ws.router, prefix="/ws", tags=["WebSocket"])
 
-# 静态服务：把本地产物目录（视频/音频/字幕）暴露为 /outputs 供前端直连播放
+# 静态产物服务（review IMPORTANT-1）：原 StaticFiles 裸挂载不继承 router 鉴权依赖，
+# 导致 /outputs 下的成片/音频/字幕可无 token 下载。改为显式路由 serve_output：
+# - Authorization 头或 ?token= 查询参数均可（浏览器媒体请求只能走后者）
+# - abspath 前缀校验防目录穿越（..、%2e%2e 等）
 # 例如 /outputs/task_1/final.mp4
+import mimetypes
+
 os.makedirs(settings.output_dir, exist_ok=True)
-app.mount("/outputs", StaticFiles(directory=settings.output_dir), name="outputs")
+
+
+@app.get("/outputs/{path:path}")
+async def serve_output(
+    path: str,
+    authorization: str | None = Header(default=None),
+    token: str = "",
+):
+    """产物文件服务（review IMPORTANT-1：带鉴权 + 目录穿越防护）。
+
+    浏览器 <video>/<img>/window.open 的媒体请求无法携带 Authorization 头，
+    故额外接受 ?token= 查询参数（与 WS 同模式）。
+    令牌为"公开同源"语义（见 client/.env.example），不作为机密凭证使用。
+    """
+    import secrets
+
+    if not settings.app_token:
+        raise HTTPException(status_code=503, detail="服务未配置 APP_TOKEN（请在 .env 设置后重启）")
+    authorized = False
+    if authorization:
+        authorized = secrets.compare_digest(authorization, f"Bearer {settings.app_token}")
+    if not authorized and token:
+        authorized = secrets.compare_digest(token, settings.app_token)
+    if not authorized:
+        raise HTTPException(status_code=401, detail="未授权：token 缺失或不匹配")
+
+    base = os.path.abspath(settings.output_dir)
+    full = os.path.abspath(os.path.join(base, path))
+    if not full.startswith(base + os.sep) or not os.path.isfile(full):
+        raise HTTPException(status_code=404, detail="未找到")
+    return FileResponse(
+        full, media_type=mimetypes.guess_type(full)[0] or "application/octet-stream"
+    )
 
 
 @app.get("/")
