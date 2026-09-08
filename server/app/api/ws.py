@@ -58,14 +58,18 @@ manager = ConnectionManager()
 
 
 def _ws_authorized(websocket: WebSocket) -> bool:
-    """WS token 校验（安全加固 REQ-S2）：query 参数 token 须等于 settings.app_token。
+    """WS token 校验（安全加固 REQ-S2；review MINOR-1 常量时间比较）。
 
+    query 参数 token 须等于 settings.app_token；
     app_token 未配置（空）时一律拒绝（fail-closed）。
     """
+    import secrets
+
     from app.config import settings
     if not settings.app_token:
         return False
-    return websocket.query_params.get("token", "") == settings.app_token
+    token = websocket.query_params.get("token", "")
+    return bool(token) and secrets.compare_digest(token, settings.app_token)
 
 
 @router.websocket("/progress/{task_id}")

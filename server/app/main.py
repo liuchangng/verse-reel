@@ -30,15 +30,18 @@ logger = logging.getLogger(__name__)
 
 
 async def require_token(authorization: str | None = Header(default=None)):
-    """Bearer Token 鉴权依赖（安全加固 REQ-S2）。
+    """Bearer Token 鉴权依赖（安全加固 REQ-S2；review MINOR-1 常量时间比较）。
 
     - app_token 未配置（空）→ 503 fail-closed（服务配置问题，拒绝一切受保护访问）
     - Authorization 头 != "Bearer <app_token>" → 401
     /health 与 / 不挂本依赖（探活豁免）。
     """
+    import secrets
+
     if not settings.app_token:
         raise HTTPException(status_code=503, detail="服务未配置 APP_TOKEN（请在 .env 设置后重启）")
-    if authorization != f"Bearer {settings.app_token}":
+    expected = f"Bearer {settings.app_token}"
+    if not (authorization and secrets.compare_digest(authorization, expected)):
         raise HTTPException(status_code=401, detail="未授权：token 缺失或不匹配")
 
 
@@ -158,16 +161,16 @@ async def health():
 
 
 def mask_api_key(key: str) -> tuple[str, bool]:
-    """对 API 密钥脱敏回显（安全加固 REQ-S1）。
+    """对 API 密钥脱敏回显（安全加固 REQ-S1；review MINOR-3 对齐契约 sk-****尾4）。
 
     返回 (脱敏字符串, 是否已配置)。空 → ("", False)；短 key(≤8) 只留首字符；
-    正常 key 保留前 5 + 尾 4，中段以 **** 遮蔽，避免明文泄露到前端。
+    正常 key 保留前 3（前缀，如 "sk-"）+ 尾 4，中段以 **** 遮蔽，避免明文泄露到前端。
     """
     if not key:
         return "", False
     if len(key) <= 8:
         return f"{key[:1]}****", True
-    return f"{key[:5]}****{key[-4:]}", True
+    return f"{key[:3]}****{key[-4:]}", True
 
 
 @app.get("/api/settings")

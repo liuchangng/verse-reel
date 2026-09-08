@@ -32,11 +32,10 @@ class TestMaskApiKey:
         assert configured is False
 
     def test_normal_key_masked(self):
+        """契约格式：sk-****尾4（前 3 字符前缀 + **** + 尾 4），守护契约而非实现。"""
         masked, configured = mask_api_key("sk-abcdefghij1234")
         assert configured is True
-        assert "sk-ab" in masked       # 前 5 字符保留
-        assert masked.endswith("1234")  # 尾 4 字符保留
-        assert "****" in masked
+        assert masked == "sk-****1234"
         assert "abcdefghij" not in masked  # 中段不泄露
 
     def test_short_key_not_leaked(self):
