@@ -48,7 +48,15 @@ async def script_env(monkeypatch):
     async def fake_voice(poem):
         return ""
 
+    async def fake_storyboard_json(script, tier="S"):
+        # script 阶段现在会接着生成分镜（STAGE_OUTPUTS["script"] 含 storyboard）
+        return json.dumps(
+            [{"time": "0-3s", "description": "月夜", "narration": "床前明月光"}],
+            ensure_ascii=False,
+        )
+
     monkeypatch.setattr(pmod.critic_service, "generate_script", fake_generate_script)
+    monkeypatch.setattr(pmod.critic_service, "generate_storyboard", fake_storyboard_json)
     monkeypatch.setattr(pmod.critic_service, "score_script", fake_score)
     monkeypatch.setattr("app.services.voice_selector.recommend", fake_voice)
     yield factory, captured

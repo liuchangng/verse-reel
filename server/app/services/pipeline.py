@@ -291,6 +291,19 @@ class PipelineEngine:
             task.image_urls = None
             await db.commit()
 
+            # 分镜（storyboard）是 script 阶段的产物之一（STAGE_OUTPUTS["script"]
+            # 含 storyboard；run_pipeline 阶段2 同源逻辑）。2026-09-09 事故：
+            # 旧版此处只清空不生成——分镜生成只存在于 run_pipeline 直跑路径，
+            # 创建任务统一入队后 storyboard 永远为空，image/tts/subtitle 三个
+            # 阶段必然"缺少前置 storyboard"失败。
+            task.current_stage = "storyboard"
+            await db.commit()
+            sb_tier = resolve_task_tier(self._task_platforms(task))
+            storyboard = await self._generate_storyboard(script_text, tier=sb_tier)
+            task.storyboard = json.dumps(storyboard, ensure_ascii=False)
+            await db.commit()
+            logger.info(f"task{task_id} 分镜生成完成: {len(storyboard)} 镜 (tier={sb_tier})")
+
         elif stage == "character":
             if _have("character_ref") and not force:
                 logger.info(f"task{task_id} character 已存在，跳过 stage")
