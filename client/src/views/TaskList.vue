@@ -93,7 +93,7 @@
                 class="btn btn-sm btn-danger"
                 :disabled="task.status === 'processing'"
                 :title="task.status === 'processing' ? '任务执行中，无法删除' : '删除任务（含数据库记录与图片/视频产物）'"
-                @click="deleteTask(task)"
+                @click="requestDelete(task)"
               >删除</button>
             </td>
           </tr>
@@ -119,12 +119,36 @@
       <div class="empty-text">暂无任务</div>
       <p class="empty-hint">去 <a href="/poetry" class="link">诗词库</a> 选一首诗创建第一个任务吧</p>
     </div>
+
+    <!-- 删除二次确认（自定义弹框，与 HotTopics/PoetryLibrary 一致）-->
+    <div class="modal-overlay" v-if="deleteTarget" @click.self="deleteTarget = null">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>删除任务</h3>
+          <button class="modal-close" @click="deleteTarget = null">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="selected-poem">
+            <span class="poem-title">《{{ deleteTarget.poem_title }}》</span>
+            <span class="poem-author">#{{ deleteTarget.id }} · {{ deleteTarget.poem_author }}</span>
+          </div>
+          <div class="modal-tip modal-tip--danger">
+            将删除该任务的数据库记录，并清理已生成的图片 / 视频 / 音频等产物文件。此操作不可恢复。
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" @click="deleteTarget = null">取消</button>
+          <button class="btn btn-danger-solid" @click="confirmDelete">确认删除</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { Message } from '@arco-design/web-vue'
 import api from '../api'
 
 const router = useRouter()
@@ -230,19 +254,25 @@ const publishTask = async (task) => {
 }
 
 // 删除（二次确认：后端会级联清理数据库记录 + 图片/视频产物目录）
-const deleteTask = async (task) => {
-  const ok = confirm(
-    `确定删除任务 #${task.id}「${task.poem_title}」？\n\n` +
-    '将删除该任务的数据库记录，并清理已生成的图片 / 视频 / 音频等产物文件。此操作不可恢复。'
-  )
-  if (!ok) return
+// 原生 confirm/alert 与 UI 风格不符，改用自定义 modal + Arco Message（与 HotTopics/PoetryLibrary 一致）
+const deleteTarget = ref(null)   // 当前待删除任务（null = 弹框关闭）
+
+const requestDelete = (task) => {
+  deleteTarget.value = task
+}
+
+const confirmDelete = async () => {
+  const task = deleteTarget.value
+  if (!task) return
+  deleteTarget.value = null
   try {
     await api.deleteTask(task.id)
+    Message.success(`任务 #${task.id} 已删除（含数据库记录与产物文件）`)
     // 删空当前页且不在第一页时回退到上一页，避免停留在无数据的末页
     if (tasks.value.length === 1 && page.value > 1) page.value -= 1
     await fetchTasks()
   } catch (error) {
-    alert('删除失败：' + (error.message || error))
+    Message.error('删除失败：' + (error.message || error))
   }
 }
 
@@ -333,6 +363,22 @@ onMounted(() => fetchTasks())
 .btn-danger:hover { background: #fff1f0; border-color: #ff7875; color: #cf1322; }
 .btn-danger:disabled { opacity: 0.45; cursor: not-allowed; background: transparent; border-color: var(--color-border); color: var(--color-text-muted); }
 .btn-danger:disabled:hover { background: transparent; }
+
+/* 删除确认弹框（自定义，与 HotTopics/PoetryLibrary 一致） */
+.btn-danger-solid { background: #cf1322; border: 1px solid #cf1322; color: #fff; }
+.btn-danger-solid:hover { background: #a8071a; border-color: #a8071a; color: #fff; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal-content { background: var(--color-bg-card); border-radius: var(--radius-lg); width: 400px; max-width: 90vw; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18); }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: var(--spacing-4) var(--spacing-5); border-bottom: 1px solid var(--color-border-light); }
+.modal-header h3 { font-size: 18px; font-weight: 600; }
+.modal-close { background: none; border: none; font-size: 24px; cursor: pointer; color: var(--color-text-muted); }
+.modal-body { padding: var(--spacing-5); }
+.modal-body .selected-poem { padding: var(--spacing-3); background: var(--color-bg); border-radius: var(--radius-md); margin-bottom: var(--spacing-4); display: flex; flex-direction: column; }
+.modal-body .selected-poem .poem-title { font-weight: 600; color: var(--color-text); }
+.modal-body .selected-poem .poem-author { font-size: 12px; color: var(--color-text-muted); }
+.modal-tip { font-size: 13px; color: var(--color-text-muted); background: rgba(201, 166, 107, 0.08); padding: var(--spacing-3); border-radius: var(--radius-md); border-left: 3px solid var(--color-primary); line-height: 1.6; }
+.modal-tip--danger { background: #fff1f0; color: #5c1a1a; border-left-color: #cf1322; }
+.modal-footer { display: flex; justify-content: flex-end; gap: var(--spacing-2); padding: var(--spacing-4) var(--spacing-5); border-top: 1px solid var(--color-border-light); }
 
 /* 空状态 */
 .empty-state { text-align: center; padding: 80px 20px; background: var(--color-bg-card); border-radius: var(--radius-lg); border: 1px dashed var(--color-border); }
