@@ -17,7 +17,8 @@ def test_parse_reply_markdown_wrapped_and_garbage():
     assert _parse_reply(wrapped) == {0: ["豪迈"]}
     assert _parse_reply("我觉得都不错") == {}
     assert _parse_reply("") == {}
-    assert _parse_reply('{"99": ["思乡"]}') == {}   # 行号越界由调用方过滤
+    # 行号越界不剔除（tag_batch 调用侧按 i >= len(poems) 过滤），解析器只管格式
+    assert _parse_reply('{"99": ["思乡"]}') == {99: ["思乡"]}
 
 
 def test_emotion_taxonomy_is_closed_and_reasonable():
