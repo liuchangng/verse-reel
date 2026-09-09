@@ -12,6 +12,7 @@
 """
 import asyncio
 import logging
+from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -144,12 +145,53 @@ def _stage_concurrency(stage: str) -> int:
     return max(1, mapping.get(stage, 1))
 
 
+class DynamicSemaphore:
+    """并发闸门（配置热更版）。
+
+    与 asyncio.Semaphore 的差异：每次 ``locked()``/``acquire()`` 均**实时**
+    调用 ``getter`` 读取当前目标并发数——设置页改了 text/image/video 并发后
+    不重启即生效（旧版 Semaphore 在启动时把数值固化，改配置无效）。
+
+    接口面与队列现有用法对齐：``locked()`` / ``await acquire()`` / ``release()``。
+    等待者在被唤醒时按**当时**的配置值重新竞争，配置调大即自动多放行。
+    """
+
+    def __init__(self, getter):
+        self._getter = getter                # () -> int，实时读取配置
+        self._current = 0                    # 当前持有数
+        self._waiters: deque[asyncio.Event] = deque()
+        self._lock = asyncio.Lock()
+
+    def locked(self) -> bool:
+        return self._current >= self._getter()
+
+    async def acquire(self) -> None:
+        while True:
+            ev: asyncio.Event | None = None
+            async with self._lock:
+                if self._current < self._getter():
+                    self._current += 1
+                    return
+                ev = asyncio.Event()
+                self._waiters.append(ev)
+            await ev.wait()
+            # 被唤醒后回循环按最新配置重新竞争；未抢到则重新排队
+
+    def release(self) -> None:
+        self._current = max(0, self._current - 1)
+        # 唤醒全部等待者重新竞争（等待者数量 = 队列深度，量级极小）
+        while self._waiters:
+            ev = self._waiters.popleft()
+            ev.set()
+
+
 class QueueService:
     """生成队列（单进程内消费者；DB 持久化，重启安全）"""
 
     def __init__(self):
-        self._sems: dict[str, asyncio.Semaphore] = {
-            stage: asyncio.Semaphore(_stage_concurrency(stage)) for stage in STAGE_ORDER
+        self._sems: dict[str, DynamicSemaphore] = {
+            stage: DynamicSemaphore(lambda stage=stage: _stage_concurrency(stage))
+            for stage in STAGE_ORDER
         }
         self._stop = False
         self._task: Optional[asyncio.Task] = None
