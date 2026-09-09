@@ -158,10 +158,10 @@ async def test_orphan_pending_jobs_cleaned_not_starving(queue_env):
     """
     svc, factory = queue_env
     await _mk_task(factory, 1)
-    # task1 已有定妆照 → video 的前置（image）视为已满足，聚焦孤儿清理逻辑
+    # task1 已有分镜图 → video 的前置（image）视为已满足，聚焦孤儿清理逻辑
     async with factory() as s:
         t = await s.get(Task, 1)
-        t.character_ref = "https://example.com/ref.png"
+        t.image_urls = '["https://example.com/sb-1.png"]'
         await s.commit()
     # task2 不存在（已被删除），但其 pending Job 还在（存量脏数据）
     orphan_id = await _mk_job(factory, 2, "character")   # priority 55，排 task1 前面

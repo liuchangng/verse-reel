@@ -124,9 +124,14 @@ def _task_produced(task: Task) -> dict[str, bool]:
     return {
         # script: 字符串正文；空字符串/默认占位符视为未生成
         "script": _nonempty(task.script),
-        # character 与 image 共用 image_urls（character_ref 通常也非空）
+        # character: 定妆照锚点
         "character": _nonempty(getattr(task, "character_ref", None)),
-        "image": _nonempty(task.image_urls) or _nonempty(getattr(task, "character_ref", None)),
+        # image: 只看分镜图本身。2026-09-09 任务001死循环事故：旧版写成
+        # ``image_urls or character_ref``，定妆照在而分镜图空时 image 被
+        # 误判"已产出"，_expand_prereqs 永不补建 image → video 三连失败
+        # "缺分镜图" → 重试同一循环永无出口。character 阶段只写
+        # character_ref，image_urls 是 image 阶段独有产物，不可混判。
+        "image": _nonempty(task.image_urls),
         "tts": _nonempty(getattr(task, "audio_url", None)),
         "video": _nonempty(getattr(task, "video_url", None)),
         "subtitle": _nonempty(getattr(task, "subtitle_url", None)),
@@ -218,10 +223,13 @@ class QueueService:
         stages = stages or list(STAGE_ORDER)
 
         async with async_session_factory() as session:
-            # 清空该任务旧 Job，避免重复消费
+            # 清理该任务旧 Job：只删 pending/running（未产生历史、留着会重复消费），
+            # 保留 done/failed 终态 Job 作为执行历史 —— 重新生成时进度弹窗的
+            # 尝试记录是「追加」而不是清零（2026-09-09 用户定夺的语义）。
             old = await session.execute(select(Job).where(Job.task_id == task_id))
             for j in old.scalars().all():
-                await session.delete(j)
+                if j.status in ("pending", "running"):
+                    await session.delete(j)
 
             # 先取 task 并在「清空产物之前」计算已产出项，
             # 再据此做依赖补全（否则 character_ref 被清掉后会误判为前置缺失）
