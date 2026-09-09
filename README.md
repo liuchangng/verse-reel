@@ -13,7 +13,8 @@
 ## 技术栈
 
 ### 后端 (server/)
-- **Python 3.11+**
+- **Python 3.12（uv 托管）**
+- **uv** - 依赖管理与虚拟环境
 - **FastAPI** - Web 框架
 - **SQLAlchemy** - ORM
 - **OpenCC** - 繁简转换
@@ -34,16 +35,21 @@
 
 ### 1. 环境要求
 
-- Python 3.11+
+- uv（含 Python 3.12 托管，后端无需全局 Python）
 - Node.js 18+
 - Agnes AI API Key
 
 ### 2. 安装依赖
 
+后端 Python 依赖统一由 uv 管理（基于 `server/pyproject.toml` + `server/uv.lock`）：
+
 ```bash
-# 后端
+# 后端（核心依赖）
 cd server
-pip install -r requirements.txt
+uv sync
+
+# 如需启用 CosyVoice 高质量 TTS（可选）
+uv sync --extra cosyvoice
 
 # 前端
 cd client
@@ -61,9 +67,9 @@ npm install
 start.bat
 
 # 或手动启动
-# 后端
+# 后端（uv 托管，使用 server/.venv）
 cd server
-python -m uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload
 
 # 前端
 cd client
@@ -87,7 +93,8 @@ python scripts/import_xml.py --file "G:/cnkgraph/CNKGraph.Writings.xml"
 │   │   ├── services/      # 业务逻辑
 │   │   └── utils/         # 工具函数
 │   ├── scripts/           # 脚本
-│   └── requirements.txt
+│   ├── pyproject.toml     # uv 依赖声明（核心 + cosyvoice extra）
+│   └── uv.lock            # uv 锁定文件（唯一事实源）
 ├── client/                 # 前端
 │   ├── src/
 │   │   ├── views/         # 页面

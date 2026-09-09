@@ -1,0 +1,92 @@
+[project]
+name = "poem-video-factory"
+version = "0.1.0"
+description = "古诗词短视频工厂后端（FastAPI + CosyVoice/edge-tts）"
+# 锁到本地 venv 实际版本范围（3.12.x），避免为 3.13/3.14 徒增无解解析
+# （torch +cu128 / onnxruntime / jieba sdist 仅在 3.12 验证过）
+requires-python = ">=3.12,<3.13"
+
+# ---- 核心依赖（原 requirements.txt 基础部分）----
+# 说明：torch / torchaudio / numpy 不在核心，归入 [cosyvoice] extra
+# （实测已随本地 venv 安装，CosyVoice 需要时才启用）
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.30.0",
+    "sqlalchemy==2.0.35",
+    "aiosqlite==0.20.0",
+    "greenlet==3.5.5",                # SQLAlchemy async 依赖
+    "jieba==0.42.1",                  # 中文分词倒排（ADR-005；Windows 走 sdist）
+    "httpx==0.27.0",
+    "opencc-python-reimplemented==0.1.7",
+    "lxml==5.3.0",
+    "websockets==13.0",
+    "python-dotenv==1.0.1",
+    "pydantic==2.9.0",
+    "pydantic-settings==2.5.0",
+    "edge-tts==7.2.8",                # 默认 TTS 引擎（微软在线，无需模型）
+
+    # 测试
+    "pytest==8.3.0",
+    "pytest-asyncio==0.24.0",
+]
+
+# ---- 可选：CosyVoice2-0.5B 高质量中文 TTS（按需启用）----
+# 启用方式：uv sync --extra cosyvoice
+# 注意：torch/torchaudio 为 +cu128 CUDA build，须走下方 pytorch index
+[project.optional-dependencies]
+cosyvoice = [
+    # CUDA build 标签必须精确指定（+cu128），其余放宽为 >= 让 resolver 找兼容组合
+    # （原 requirements.txt 这批是 pip "先装后凑" 的死 pin，uv 严格解析下互相矛盾）
+    "torch==2.11.0+cu128",
+    "torchaudio==2.11.0+cu128",
+    "numpy>=2.0",
+    "transformers>=4.51.3",
+    "modelscope>=1.20.0",
+    "onnxruntime>=1.29.0",
+    "protobuf>=4.25.8",
+    "hyperpyyaml>=1.2.3",
+    "conformer>=0.3.2",
+    "omegaconf>=2.3.0",
+    "hydra-core>=1.3.2",
+    "wetext>=0.0.4",
+    "inflect>=7.3.1",
+    "rich>=13.7.1",
+    "tqdm>=4.70.0",
+    "antlr4-python3-runtime>=4.9.3",
+    "soundfile>=0.14.0",
+    "pyarrow>=25.0.1",
+    "pyworld>=0.3.5",
+    "diffusers>=0.40.0",
+    "huggingface-hub",
+    "lightning>=2.6.5",
+    "gdown>=5.2.0",
+    "torchcodec>=0.16.0",
+    "peft>=0.20.0",
+    "accelerate>=1.7.0",
+    "einops>=0.8.1",
+    "x-transformers>=2.28.3",
+    "openai-whisper>=20250625",
+]
+
+# ---- uv 构建/索引配置 ----
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+# torch / torchaudio 的 +cu128 CUDA build 不在 PyPI，走 PyTorch 官方 index
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+# 默认走 PyPI
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+# 将 torch / torchaudio 显式绑定到 pytorch-cu128 index（+cu128 本地版本标签该 index 才有）
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
