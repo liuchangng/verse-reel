@@ -453,9 +453,11 @@ const regenerateOneShot = async (idx) => {
   }
 }
 const regenerateTask = async () => {
-  // 任务完成后 current_stage 会是 "done"（非法 stage，后端 400），
-  // 此时重跑整条流水线；进行中任务按当前 stage 重跑。
-  const stage = task.value.current_stage === 'done' ? 'all' : task.value.current_stage
+  // current_stage 可能是流水线子阶段（如 hotspot=抓取热点、done=完成），这些不在
+  // 后端重生成白名单（script/character/image/tts/video/subtitle/all + 别名 storyboard/spot）内，
+  // 直接透传会 400「未知阶段」。白名单外的值一律回退到 all（重跑整条流水线）。
+  const LEGAL_STAGES = ['script', 'character', 'image', 'tts', 'video', 'subtitle', 'all', 'storyboard', 'spot']
+  const stage = LEGAL_STAGES.includes(task.value.current_stage) ? task.value.current_stage : 'all'
   try { await api.regenerateTask(taskId.value, stage); await loadTask() }
   catch(e) {}
 }
