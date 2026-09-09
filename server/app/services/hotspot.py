@@ -254,6 +254,67 @@ _STOPWORDS_JIEBA = frozenset({
     "走红", "爆火", "刷屏", "出圈", "热搜", " trending",
 })
 
+# ====== 热点质量过滤（2026-09-09 问题 4a）======
+# 数据源（微博/抖音/百度/知乎/B站热榜）本质是流量榜：夸大、标题党、舆论引导，
+# 有数量没质量。抓取后先规则过滤（确定性、零成本），再 LLM 批筛（一次调用）。
+# 规则层杀三类硬伤：凶案猎奇 / 产品消费 / 桃色八卦——这类选题与诗词创作完全无关。
+_JUNK_TITLE_PATTERNS: tuple[str, ...] = (
+    # 凶案/猎奇/悲剧（"女孩去邻居家吃饭惨遭夫妻分尸"类）
+    "分尸", "碎尸", "命案", "凶杀", "凶手", "被杀", "遇害", "惨遭", "尸体",
+    "坠楼", "跳楼", "自杀", "猝死", "车祸", "灭门", "强奸", "性侵", "猥亵",
+    "虐待", "家暴", "血腥", "诱骗", "拐卖", "传销", "诈骗团伙",
+    # 产品/消费/商业（"iPhone18系列开售"类）
+    "iphone", "huawei", "xiaomi", "发布", "开售", "发售", "上新", "新品",
+    "预售", "抢购", "秒杀", "降价", "折扣", "优惠券", "双十一", "双11",
+    "618", "年货节", "黑五", "直播带货", "爆款好物", "团购", "外卖红包",
+    # 桃色/娱乐八卦
+    "恋情", "绯闻", "出轨", "离婚", "分手", "复合", "小三", "官宣结婚",
+    "塌房", "整形", "走光",
+)
+
+# LLM 批筛提示词：只留适合古诗词短视频创作的选题
+_LLM_FILTER_PROMPT = (
+    "你是古诗词短视频的选题编辑。下面是热搜标题列表（JSONL，行号从0开始）。\n"
+    "判断每个标题是否适合作为古诗词短视频选题：保留与节令节气、自然景物、"
+    "思乡怀旧、人生感悟、家国情怀、传统文化、情感共鸣相关的标题；\n"
+    "剔除纯娱乐八卦、社会猎奇、产品消费、体育赛事、争议撕扯类标题。\n"
+    "只输出保留项的行号 JSON 数组，如 [0,3,7]，不要输出其他内容。\n\n标题列表：\n"
+)
+
+
+def _rule_filter_mask(titles: list[str]) -> list[bool]:
+    """规则过滤：返回与 titles 等长的保留掩码。命中垃圾词面 → False。
+
+    确定性、零成本；垃圾词表见 _JUNK_TITLE_PATTERNS（不区分大小写，含英文）。
+    """
+    mask = []
+    for t in titles:
+        low = (t or "").lower()
+        mask.append(not any(p in low for p in _JUNK_TITLE_PATTERNS))
+    return mask
+
+
+def _parse_llm_filter_reply(raw: str, total: int) -> list[int] | None:
+    """解析 LLM 批筛回复（行号 JSON 数组）。格式非法返回 None（调用方全保留）。
+
+    宽松解析：JSON 直接可解析则用之（剔除非整数/越界）；否则从方括号内
+    抽取整数（容忍 "[0,'x']" 这类不规范回复）。
+    """
+    import json as _json
+    import re as _re
+    m = _re.search(r"\[[\s\S]*?\]", raw or "")
+    if not m:
+        return None
+    body = m.group(0)
+    try:
+        idxs = _json.loads(body)
+        if not isinstance(idxs, list):
+            return None
+        return [i for i in idxs if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < total]
+    except ValueError:
+        nums = [int(n) for n in _re.findall(r"-?\d+", body)]
+        return [n for n in nums if 0 <= n < total] if nums else None
+
 
 class HotspotService:
     """热点服务"""
@@ -339,6 +400,58 @@ class HotspotService:
                 for item in items
             ]
 
+        # 质量过滤（2026-09-09 问题 4a）：规则先杀 + LLM 批筛，只留适合诗词创作的选题
+        return await self._filter_quality(results)
+
+    async def _filter_quality(self, results: dict[str, list[dict]]) -> dict[str, list[dict]]:
+        """两层质量过滤（原地）：
+
+        1. 规则层：凶案猎奇/产品消费/桃色八卦词面直接剔除（确定性、零成本）；
+        2. LLM 层：剩余标题合并一次调用批筛，保留适合诗词创作的选题。
+           LLM 不可用/失败时保留规则存活项（宁缺毋滥交给推荐侧质量池）。
+        静态兜底条目（_is_fallback）不参与过滤、不落库，原样保留标记。
+        """
+        # 收集非兜底条目的 (platform, idx)
+        candidates = [
+            (p, i) for p, items in results.items() for i, it in enumerate(items)
+            if not it.get("_is_fallback") and it.get("title")
+        ]
+        if not candidates:
+            return results
+
+        titles = [results[p][i]["title"] for p, i in candidates]
+        rule_mask = _rule_filter_mask(titles)
+        rule_alive = [idx for idx, ok in enumerate(rule_mask) if ok]
+        rule_killed = len(titles) - len(rule_alive)
+
+        # LLM 批筛（一次调用）；失败则保留规则存活项
+        final_alive = set(rule_alive)
+        if rule_alive:
+            try:
+                numbered = "\n".join(f"{idx}\t{titles[idx]}" for idx in rule_alive)
+                raw = await agnes_client.generate_text(
+                    [{"role": "user", "content": _LLM_FILTER_PROMPT + numbered}],
+                    max_tokens=300,
+                )
+                keep = _parse_llm_filter_reply(raw, len(titles))
+                if keep is None:
+                    logger.warning("热点 LLM 批筛回复格式非法，保留规则存活项")
+                else:
+                    final_alive = set(keep)
+            except Exception as e:
+                logger.warning(f"热点 LLM 批筛失败（保留规则存活项）: {e}")
+
+        llm_killed = len(rule_alive) - len(final_alive)
+        if rule_killed or llm_killed:
+            logger.info(
+                f"热点质量过滤: 规则剔除 {rule_killed} 条, LLM 剔除 {llm_killed} 条, "
+                f"保留 {len(final_alive)}/{len(titles)} 条"
+            )
+
+        # 按平台重建（保序；被剔除的条目直接丢弃）
+        drop = {candidates[idx] for idx in range(len(titles)) if idx not in final_alive}
+        for p, items in results.items():
+            results[p] = [it for i, it in enumerate(items) if (p, i) not in drop]
         return results
 
     async def _fetch_newsnow(self, base: str, platform: str, limit: int) -> list[dict]:
