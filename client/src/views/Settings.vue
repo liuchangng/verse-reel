@@ -326,6 +326,11 @@
 <script setup>
 import { reactive, ref, onMounted } from 'vue'
 
+// 鉴权 token（与 client/.env 的 VITE_APP_TOKEN 同源；REQ-S2，与后端 APP_TOKEN 一致）
+// 本组件部分接口直接走 fetch，不经 apiClient 拦截器，须手动带 Authorization
+const AUTH_TOKEN = import.meta.env.VITE_APP_TOKEN || ''
+const authHeaders = () => (AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {})
+
 const DEFAULT_BASE_URL = 'https://api.agnes-ai.cn/v1'
 
 // 密钥配置状态（安全加固：密钥不再硬编码/明文回显，只显示"是否已配置"标记）
@@ -395,7 +400,7 @@ const showHint = (text, kind = 'ok', ttlMs = 2500) => {
 // ---- 加载/保存 ----
 const loadSettings = async () => {
   try {
-    const resp = await fetch('/api/settings')
+    const resp = await fetch('/api/settings', { headers: authHeaders() })
     if (!resp.ok) throw new Error('HTTP ' + resp.status)
     const data = await resp.json()
     Object.entries(data).forEach(([k, v]) => {
@@ -432,7 +437,7 @@ const saveSettings = async () => {
   try {
     const resp = await fetch('/api/settings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(payload),
     })
     if (!resp.ok) throw new Error('HTTP ' + resp.status)
@@ -455,7 +460,7 @@ const resetSettings = async () => {
   if (!confirm('确认恢复默认设置？（服务器侧的持久化也会清空）')) return
   saving.value = true
   try {
-    const resp = await fetch('/api/settings/reset', { method: 'POST' })
+    const resp = await fetch('/api/settings/reset', { method: 'POST', headers: authHeaders() })
     if (!resp.ok) throw new Error('HTTP ' + resp.status)
     const data = await resp.json()
     Object.entries(data.settings || {}).forEach(([k, v]) => {
@@ -477,7 +482,7 @@ const testConcurrency = async (type) => {
   testing.value = type
   const concurrency = settings[`${type}_concurrency`]
   try {
-    const resp = await fetch(`/api/settings/test-concurrency?type=${type}&concurrency=${concurrency}`)
+    const resp = await fetch(`/api/settings/test-concurrency?type=${type}&concurrency=${concurrency}`, { headers: authHeaders() })
     const data = await resp.json()
     testResults[type] = data
   } catch (e) {
