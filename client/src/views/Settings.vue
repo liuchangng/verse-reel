@@ -51,19 +51,11 @@
               <button class="num-btn" @click="dec('text_concurrency')" :disabled="settings.text_concurrency <= 1">−</button>
               <input class="form-input num-input" type="number" v-model.number="settings.text_concurrency" min="1" max="10" />
               <button class="num-btn" @click="inc('text_concurrency')" :disabled="settings.text_concurrency >= 10">+</button>
-              <button class="btn btn-test" @click="testConcurrency('text')" :disabled="testing === 'text'">
-                {{ testing === 'text' ? '⏳ 测试中…' : '🧪 测试' }}
-              </button>
             </div>
             <div class="form-hint">
               💡 官方 RPM 约 <b>60 次/分钟</b>（文本档）；单次响应通常 2-8s，
               <b>推荐 2–5</b>。设 5 时 RPM≈40 安全；设 10 时理论 RPM≈75+ 长期会撞 429。
             </div>
-          </div>
-          <div v-if="testResults.text" class="test-result" :class="testResults.text.failed > 0 ? 'result-warn' : 'result-ok'">
-            ✅ 成功 {{ testResults.text.success }}/{{ testResults.text.concurrency }}
-            <span v-if="testResults.text.failed > 0"> ❌ 失败 {{ testResults.text.failed }}</span>
-            ⏱️ {{ testResults.text.total_time }}s（端点 {{ testResults.text.endpoint }}）
           </div>
         </div>
       </div>
@@ -105,20 +97,12 @@
               <button class="num-btn" @click="dec('image_concurrency')" :disabled="settings.image_concurrency <= 1">−</button>
               <input class="form-input num-input" type="number" v-model.number="settings.image_concurrency" min="1" max="10" />
               <button class="num-btn" @click="inc('image_concurrency')" :disabled="settings.image_concurrency >= 10">+</button>
-              <button class="btn btn-test" @click="testConcurrency('image')" :disabled="testing === 'image'">
-                {{ testing === 'image' ? '⏳ 测试中…' : '🧪 测试' }}
-              </button>
             </div>
             <div class="form-hint">
               💡 官方 RPM：<b>1K=20/min, 2K=12/min, 3K=8/min, 4K=4/min</b>。
               单图耗时 10–25s，<b>推荐 2–3</b>。设 5 时 1K 档 RPM≈12–25 接近上限，
               设 8+ 几乎必撞 429。
             </div>
-          </div>
-          <div v-if="testResults.image" class="test-result" :class="testResults.image.failed > 0 ? 'result-warn' : 'result-ok'">
-            ✅ 成功 {{ testResults.image.success }}/{{ testResults.image.concurrency }}
-            <span v-if="testResults.image.failed > 0"> ❌ 失败 {{ testResults.image.failed }}</span>
-            ⏱️ {{ testResults.image.total_time }}s（端点 {{ testResults.image.endpoint }}）
           </div>
         </div>
       </div>
@@ -163,19 +147,11 @@
               <button class="num-btn" @click="dec('video_concurrency')" :disabled="settings.video_concurrency <= 1">−</button>
               <input class="form-input num-input" type="number" v-model.number="settings.video_concurrency" min="1" max="3" />
               <button class="num-btn" @click="inc('video_concurrency')" :disabled="settings.video_concurrency >= 3">+</button>
-              <button class="btn btn-test" @click="testConcurrency('video')" :disabled="testing === 'video'">
-                {{ testing === 'video' ? '⏳ 测试中…' : '🧪 测试' }}
-              </button>
             </div>
             <div class="form-hint">
               💡 <b>必须 1</b>（视频两次提交间隔 < 60s 必返 400/429 <code>rate_limit_exceeded</code>）；
               后端已内置退避重试（≥65s、最多 6 次）。改高于 1 只是浪费配额。
             </div>
-          </div>
-          <div v-if="testResults.video" class="test-result" :class="testResults.video.failed > 0 ? 'result-warn' : 'result-ok'">
-            ✅ 成功 {{ testResults.video.success }}/{{ testResults.video.concurrency }}
-            <span v-if="testResults.video.failed > 0"> ❌ 失败 {{ testResults.video.failed }}</span>
-            ⏱️ {{ testResults.video.total_time }}s（端点 {{ testResults.video.endpoint }}）
           </div>
         </div>
       </div>
@@ -391,9 +367,7 @@ const settings = reactive({
 })
 
 const saving = ref(false)
-const testing = ref('')
 const saveHint = ref(null)
-const testResults = reactive({ text: null, image: null, video: null })
 
 // 连通性测试状态（base_url + key 探活）
 const connTesting = ref('')
@@ -488,7 +462,7 @@ const resetSettings = async () => {
     })
     settings.min_script_score = data.settings?.script_score_threshold ?? 7
     settings.min_image_score = data.settings?.image_score_threshold ?? 7
-    testResults.text = null; testResults.image = null; testResults.video = null
+    connResults.text = null; connResults.image = null; connResults.video = null
     showHint('已重置为 Pydantic 默认值', 'ok')
   } catch (e) {
     showHint('❌ 重置失败：' + e.message, 'warn', 5000)
@@ -497,22 +471,8 @@ const resetSettings = async () => {
   }
 }
 
-// ---- 并发测试 ----
-const testConcurrency = async (type) => {
-  testing.value = type
-  const concurrency = settings[`${type}_concurrency`]
-  try {
-    const resp = await fetch(`/api/settings/test-concurrency?type=${type}&concurrency=${concurrency}`, { headers: authHeaders() })
-    const data = await resp.json()
-    testResults[type] = data
-  } catch (e) {
-    testResults[type] = { success: 0, failed: concurrency, total_time: 0, error: e.message }
-  } finally {
-    testing.value = ''
-  }
-}
-
 // ---- 连通性测试（探活 base_url + key，2026-09-09 设置页"测试连接"）----
+// 并发测试已删（2026-09-09 用户定夺：队列有重试兜底，并发实测无意义，只留连通性）
 const testConnection = async (type) => {
   connTesting.value = type
   connResults[type] = null
@@ -638,14 +598,6 @@ onMounted(loadSettings)
 .btn-test:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-.test-result {
-  margin-top: var(--spacing-2);
-  padding: var(--spacing-2) var(--spacing-3);
-  border-radius: var(--radius-md);
-  font-size: 13px;
-  font-weight: 500;
 }
 
 .result-ok {

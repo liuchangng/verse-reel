@@ -1,11 +1,10 @@
 """FastAPI 主应用入口"""
-import asyncio
 import logging
 import os
 import time
 import httpx
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query, Header, Depends
+from fastapi import FastAPI, Header, Depends
 from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -301,7 +300,8 @@ async def test_connection(data: dict, token: str = Depends(require_token)):
         ok, msg = (True, "连接正常，API key 有效") if status == 200 else (
             False, f"HTTP {status}：{'key 无效或未授权' if status in (401, 403) else '端点可达但 /models 异常'}")
     else:
-        ok, msg = (True, f"端点可达（HTTP {status}）") if status < 500 else (
+        # 根路径无标准探针端点，404 属正常——用户要求不提 404，只说结论
+        ok, msg = (True, "网络可达，服务正常") if status < 500 else (
             False, f"HTTP {status}：端点异常")
     return {"ok": ok, "http_status": status, "latency_ms": latency, "message": msg}
 
@@ -346,95 +346,6 @@ def _throttle_snapshot() -> dict:
     return {
         l.name: l.snapshot()
         for l in (text_limiter, image_1k_limiter, image_high_limiter, video_limiter)
-    }
-
-
-@app.get("/api/settings/test-concurrency")
-async def test_concurrency(
-    type: str = Query(..., description="测试类型: text/image/video"),
-    concurrency: int = Query(1, ge=1, le=10, description="并发数"),
-    token: str = Depends(require_token),
-):
-    """测试并发数：同时发 N 个请求并统计成功/失败/耗时。
-
-    修复（vs 旧版）：
-      - 旧版硬编码 ``settings.agnes_base_url`` / ``settings.agnes_api_key``，但 Pydantic
-        的字段其实是 ``text_base_url``/``image_base_url``/``video_base_url``，导致旧版
-        实际全报异常（success=0）。
-      - 视频参数用 SKILL 规范的 ``width/height/num_frames/frame_rate``，不再使用
-        ``mode/seconds/size/aspect_ratio``（该旧字段在 agnes-video-v2.0 上被拒）。
-      - 读当前用户在“系统设置”页面保存的对应类型 base_url/api_key/model。
-      安全加固：接口限频（满窗 429），防止被刷消耗额度。
-    """
-    from app.services.rate_limiter import api_limiter_heavy
-
-    if not await api_limiter_heavy.acquire(timeout=0):
-        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
-
-    import httpx
-
-    if type == "text":
-        base_url, api_key, model = settings.text_base_url, settings.text_api_key, settings.text_model
-        endpoint = f"{base_url}/chat/completions"
-        body = {"model": model, "messages": [{"role": "user", "content": "Say OK"}], "max_tokens": 5}
-    elif type == "image":
-        base_url, api_key, model = settings.image_base_url, settings.image_api_key, settings.image_model
-        endpoint = f"{base_url}/images/generations"
-        # 与 SKILL 规范一致：size=1K + ratio=1:1
-        body = {"model": model, "prompt": "a simple test image",
-                "size": "1K", "ratio": "1:1", "n": 1,
-                "extra_body": {"response_format": "url"}}
-    elif type == "video":
-        base_url, api_key, model = settings.video_base_url, settings.video_api_key, settings.video_model
-        endpoint = f"{base_url}/videos"
-        # SKILL 规范：width/height/num_frames(8n+1)/frame_rate
-        body = {"model": model, "prompt": "a simple test video",
-                "width": 1152, "height": 768, "num_frames": 121, "frame_rate": 24}
-    else:
-        return {"error": f"未知类型: {type}"}
-
-    results = []
-    start_time = time.time()
-
-    async def single_request(index: int):
-        req_start = time.time()
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    endpoint,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json=body,
-                )
-            elapsed = time.time() - req_start
-            ok = resp.status_code == 200
-            return {
-                "index": index,
-                "success": ok,
-                "status_code": resp.status_code,
-                "elapsed": round(elapsed, 2),
-                "error": None if ok else (resp.text[:200] if not ok else None),
-            }
-        except Exception as e:
-            elapsed = time.time() - req_start
-            return {"index": index, "success": False, "error": str(e),
-                    "elapsed": round(elapsed, 2)}
-
-    tasks_list = [single_request(i) for i in range(concurrency)]
-    results = await asyncio.gather(*tasks_list)
-
-    total_time = time.time() - start_time
-    success_count = sum(1 for r in results if r["success"])
-    fail_count = concurrency - success_count
-
-    return {
-        "type": type,
-        "concurrency": concurrency,
-        "endpoint": endpoint,
-        "model": model,
-        "success": success_count,
-        "failed": fail_count,
-        "total_time": round(total_time, 2),
-        "details": results,
     }
 
 

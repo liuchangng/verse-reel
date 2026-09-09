@@ -67,17 +67,8 @@ class TestRateLimit:
         assert await lim.acquire(timeout=0) is True
         assert await lim.acquire(timeout=0) is False  # 满窗拒绝
 
-    def test_test_concurrency_429_when_limited(self, auth_headers, monkeypatch):
-        """test-concurrency 超频 → 429（monkeypatch 限频器拒绝）。"""
-        from app.services import rate_limiter as rl_mod
-
-        async def _deny(*a, **k):
-            return False
-
-        monkeypatch.setattr(rl_mod.api_limiter_heavy, "acquire", _deny)
-        with TestClient(app) as client:
-            r = client.get("/api/settings/test-concurrency?type=text&concurrency=1", headers=auth_headers)
-            assert r.status_code == 429
+    # test-concurrency 端点已于 2026-09-09 删除（用户定夺：队列有重试兜底，并发实测无意义），
+    # 对应 429 守护测试一并移除；限频器语义由上方 test_limiter_timeout_zero_returns_false 覆盖。
 
 
 # ---------- REQ-S4 P1 质量项 ----------
