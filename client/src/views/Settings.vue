@@ -84,7 +84,15 @@
           </div>
           <div class="form-item">
             <div class="form-label">Base URL</div>
-            <input class="form-input" v-model="settings.image_base_url" placeholder="https://api.xxx.com/v1" />
+            <div class="input-row">
+              <input class="form-input" v-model="settings.image_base_url" placeholder="https://api.xxx.com/v1" />
+              <button class="btn btn-test" @click="testConnection('image')" :disabled="connTesting === 'image'">
+                {{ connTesting === 'image' ? '⏳ …' : '🔌 连接' }}
+              </button>
+            </div>
+            <div v-if="connResults.image" class="form-hint" :class="connResults.image.ok ? 'result-ok' : 'result-warn'">
+              {{ connResults.image.ok ? '✅' : '❌' }} {{ connResults.image.message }}（{{ connResults.image.latency_ms }}ms）
+            </div>
           </div>
           <div class="form-item">
             <div class="form-label">模型名称</div>
@@ -131,7 +139,15 @@
           </div>
           <div class="form-item">
             <div class="form-label">Base URL</div>
-            <input class="form-input" v-model="settings.video_base_url" placeholder="https://api.xxx.com/v1" />
+            <div class="input-row">
+              <input class="form-input" v-model="settings.video_base_url" placeholder="https://api.xxx.com/v1" />
+              <button class="btn btn-test" @click="testConnection('video')" :disabled="connTesting === 'video'">
+                {{ connTesting === 'video' ? '⏳ …' : '🔌 连接' }}
+              </button>
+            </div>
+            <div v-if="connResults.video" class="form-hint" :class="connResults.video.ok ? 'result-ok' : 'result-warn'">
+              {{ connResults.video.ok ? '✅' : '❌' }} {{ connResults.video.message }}（{{ connResults.video.latency_ms }}ms）
+            </div>
           </div>
           <div class="form-item">
             <div class="form-label">模型名称</div>
@@ -379,6 +395,10 @@ const testing = ref('')
 const saveHint = ref(null)
 const testResults = reactive({ text: null, image: null, video: null })
 
+// 连通性测试状态（base_url + key 探活）
+const connTesting = ref('')
+const connResults = reactive({ text: null, image: null, video: null })
+
 // 平台全集（设置页"发布平台"与创建任务弹窗共用）
 const allPlatforms = [
   { id: 'douyin', name: '抖音', icon: '🎵', ratio: '9:16' },
@@ -489,6 +509,25 @@ const testConcurrency = async (type) => {
     testResults[type] = { success: 0, failed: concurrency, total_time: 0, error: e.message }
   } finally {
     testing.value = ''
+  }
+}
+
+// ---- 连通性测试（探活 base_url + key，2026-09-09 设置页"测试连接"）----
+const testConnection = async (type) => {
+  connTesting.value = type
+  connResults[type] = null
+  try {
+    const resp = await fetch('/api/settings/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ type }),
+    })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    connResults[type] = await resp.json()
+  } catch (e) {
+    connResults[type] = { ok: false, latency_ms: null, message: '请求失败：' + e.message }
+  } finally {
+    connTesting.value = ''
   }
 }
 

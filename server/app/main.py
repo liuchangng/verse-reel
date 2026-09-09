@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import time
+import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, Header, Depends
 from fastapi.exceptions import HTTPException
@@ -256,6 +257,53 @@ async def reset_settings_api(token: str = Depends(require_token)):
         except Exception as exc:
             logger.warning("重置设置 %s 失败: %s", key, exc)
     return {"message": "已恢复默认值", "settings": await get_settings()}
+
+
+@app.post("/api/settings/test-connection")
+async def test_connection(data: dict, token: str = Depends(require_token)):
+    """模型连通性探活（设置页"测试连接"按钮）。
+
+    body: {"type": "text" | "image" | "video"}
+    - text:  GET {base_url}/models + Bearer key（OpenAI 兼容标准探针，
+             200=通且 key 有效；401/403=网络通但 key 错；连接错误=不可达）
+    - image/video: GET {base_url} 根路径——无标准探针端点，
+             任何 HTTP 响应（含 404）即证明 DNS/TCP/TLS 可达。
+    返回 {ok, http_status, latency_ms, message}；探测用的是**当前内存配置**
+    （含未保存的运行时 overlay），与实际生成请求同源同路。
+    """
+    mtype = (data or {}).get("type", "")
+    conf = {
+        "text": (settings.text_base_url, settings.text_api_key),
+        "image": (settings.image_base_url, settings.image_api_key),
+        "video": (settings.video_base_url, settings.video_api_key),
+    }
+    if mtype not in conf:
+        raise HTTPException(status_code=400, detail=f"未知类型: {mtype}（应为 text/image/video）")
+    base_url, api_key = conf[mtype]
+    if not base_url:
+        return {"ok": False, "http_status": None, "latency_ms": None, "message": "base_url 未配置"}
+
+    url = f"{base_url.rstrip('/')}/models" if mtype == "text" else base_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.TransportError as e:
+        latency = int((time.monotonic() - t0) * 1000)
+        return {
+            "ok": False, "http_status": None, "latency_ms": latency,
+            "message": f"连接失败（{type(e).__name__}）：检查网络出口/代理或 base_url",
+        }
+    latency = int((time.monotonic() - t0) * 1000)
+    status = resp.status_code
+    if mtype == "text":
+        ok, msg = (True, "连接正常，API key 有效") if status == 200 else (
+            False, f"HTTP {status}：{'key 无效或未授权' if status in (401, 403) else '端点可达但 /models 异常'}")
+    else:
+        ok, msg = (True, f"端点可达（HTTP {status}）") if status < 500 else (
+            False, f"HTTP {status}：端点异常")
+    return {"ok": ok, "http_status": status, "latency_ms": latency, "message": msg}
 
 
 @app.get("/api/queue/status")
