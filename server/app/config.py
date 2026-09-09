@@ -248,6 +248,13 @@ class Settings(BaseSettings):
     # 置空字符串则不启用，直接走各平台前端接口直连。
     newsnow_base_url: str = Field(default="http://localhost:4444")
 
+    # ====== 视频片段配置 ======
+    # agnes 视频片段（1 次/分钟限制）在成片中被 final.mp4（图片+TTS 幻灯片）完全覆盖
+    # （见 pipeline._burn_subtitles 注释），默认关闭：流水线跳过 video 阶段，
+    # 省去每任务 ≥1 分钟等待与 API 费用。需要片头/空镜素材时置 true，
+    # 或对单个任务手动 regenerate stage=video 强制生成。
+    enable_agnes_video: bool = Field(default=False)
+
     # ====== 通用配置 ======
     critic_concurrency: int = Field(default=5)
     script_score_threshold: float = Field(default=7.0)

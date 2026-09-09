@@ -515,16 +515,22 @@ class PipelineEngine:
             await db.commit()
             
             # 阶段4: 生成视频（使用平台配置的尺寸）
-            task.current_stage = "video"
-            task.progress = 60
-            await db.commit()
-            
-            platform_cfg = PLATFORM_CONFIG.get(task.platform, PLATFORM_CONFIG["douyin"])
-            video_url = await self._generate_video(task, image_urls, platform_cfg, style)
+            # agnes 片段在成片中被 final.mp4（图片+TTS 幻灯片）完全覆盖（见
+            # _burn_subtitles 注释），默认关闭省去每任务 ≥1 分钟（1 次/分钟限制）
+            # 与 API 费用；enable_agnes_video=true 或手动 regenerate stage=video 可启用。
+            if not settings.enable_agnes_video:
+                logger.info(f"task{task_id} agnes 视频片段已关闭(enable_agnes_video=False)，跳过阶段4")
+            else:
+                task.current_stage = "video"
+                task.progress = 60
+                await db.commit()
 
-            # 立即回写视频 URL
-            task.video_url = video_url
-            await db.commit()
+                platform_cfg = PLATFORM_CONFIG.get(task.platform, PLATFORM_CONFIG["douyin"])
+                video_url = await self._generate_video(task, image_urls, platform_cfg, style)
+
+                # 立即回写视频 URL
+                task.video_url = video_url
+                await db.commit()
             
             # 阶段5: TTS 配音
             task.current_stage = "tts"
