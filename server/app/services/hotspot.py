@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy import select, func, text, case
 from datetime import datetime, timedelta
 
+from app.config import settings
 from app.models.poem_term import PoemTerm
 from app.models.poem import Poem
 from app.models.hotspot import Hotspot
@@ -259,9 +260,13 @@ class HotspotService:
     
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=10.0)
-    
+        # NewsNow 专用 client：目标是本机自部署服务，trust_env=False 避免
+        # 环境代理（HTTP(S)_PROXY）劫持 localhost 流量导致连不通。
+        self.newsnow_client = httpx.AsyncClient(timeout=10.0, trust_env=False)
+
     async def close(self):
         await self.client.aclose()
+        await self.newsnow_client.aclose()
     
     async def fetch_hotspots(
         self,
@@ -280,53 +285,84 @@ class HotspotService:
         """
         if platforms is None:
             platforms = list(HOTSPOT_SOURCES.keys())
-        
+
+        newsnow_base = (getattr(settings, "newsnow_base_url", "") or "").rstrip("/")
         results = {}
         for platform in platforms:
             if platform not in HOTSPOT_SOURCES:
                 results[platform] = []
                 continue
-            
-            try:
-                source = HOTSPOT_SOURCES[platform]
-                resp = await self.client.get(
-                    source["api"],
-                    headers={"User-Agent": "Mozilla/5.0"},
-                )
-                resp.raise_for_status()
-                
-                data = resp.json()
-                
-                # 解析不同平台的返回格式
-                items = self._parse_platform_data(platform, data)
-                items = items[:limit]
-                
-                results[platform] = [
-                    {
-                        "title": item.get("title", ""),
-                        "hot": item.get("hot", 0),
-                        "url": item.get("url", ""),
-                        "platform": source["name"],
-                    }
-                    for item in items
-                ]
-                logger.info(f"抓取 {source['name']} 热搜: {len(items)} 条")
-                
-            except Exception as e:
-                logger.warning(f"抓取 {platform} 热搜失败: {e}, 使用备用数据")
-                # 使用备用数据
-                fallback = FALLBACK_HOTSPOTS.get(platform, [])[:limit]
-                results[platform] = [
-                    {
-                        "title": item.get("title", ""),
-                        "hot": item.get("hot", 0),
-                        "url": "",
-                        "platform": HOTSPOT_SOURCES.get(platform, {}).get("name", platform),
-                    }
-                    for item in fallback
-                ]
-        
+
+            source = HOTSPOT_SOURCES[platform]
+            items = None  # [{"title","hot","url"}]；None 表示该路失败，继续降级
+
+            # 主路：NewsNow 自部署聚合（统一 JSON，上游适配由社区维护）。
+            # 平台 key 与 NewsNow 源 id 同名，直接拼 id 参数。
+            if newsnow_base:
+                try:
+                    items = await self._fetch_newsnow(newsnow_base, platform, limit)
+                    logger.info(f"抓取 {source['name']} 热搜(NewsNow): {len(items)} 条")
+                except Exception as e:
+                    logger.warning(f"NewsNow {platform} 抓取失败: {e}, 回退平台直连")
+
+            # 备路：各平台前端接口直连（解析各自返回格式）
+            if items is None:
+                try:
+                    resp = await self.client.get(
+                        source["api"],
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    resp.raise_for_status()
+                    items = self._parse_platform_data(platform, resp.json())[:limit]
+                    logger.info(f"抓取 {source['name']} 热搜(直连): {len(items)} 条")
+                except Exception as e:
+                    logger.warning(f"抓取 {platform} 热搜失败: {e}, 使用备用数据")
+
+            # 最后兜底：静态数据（仅冷启动/全源失败时，防止结果列表为空）
+            if items is None:
+                items = FALLBACK_HOTSPOTS.get(platform, [])[:limit]
+
+            results[platform] = [
+                {
+                    "title": item.get("title", ""),
+                    "hot": item.get("hot", 0),
+                    "url": item.get("url", ""),
+                    "platform": source["name"],
+                }
+                for item in items
+            ]
+
         return results
+
+    async def _fetch_newsnow(self, base: str, platform: str, limit: int) -> list[dict]:
+        """NewsNow 聚合源（主路）。GET {base}/api/s?id={platform}。
+
+        返回格式：{"status":"success","id":..,"updatedTime":..,
+                   "items":[{"id","title","url","mobileUrl","extra"?}, ...]}
+        失败抛异常，由调用方回退平台直连。
+        """
+        resp = await self.newsnow_client.get(f"{base}/api/s?id={platform}")
+        resp.raise_for_status()
+        data = resp.json()
+        # status=success（实时抓到）| cache（实时失败，回吐服务端旧缓存）——
+        # 两者都含有效 items；cache 正是我们要的"最近一次成功缓存"语义，照收并记日志。
+        status = data.get("status")
+        if status not in ("success", "cache"):
+            raise ValueError(f"status={status}")
+        if status == "cache":
+            logger.info(f"NewsNow {platform}: 实时抓取失败，使用服务端缓存数据")
+        items = data.get("items") or []
+        out = []
+        for idx, it in enumerate(items[:limit]):
+            # NewsNow 各源热度字段不统一（有的在 extra.info 文案里）；
+            # 统一用榜内位次倒序填充 hot，保证落库后 load_hotspots 的
+            # hot 降序能还原平台内原始排序（跨平台热度本就不可比）。
+            out.append({
+                "title": it.get("title", ""),
+                "hot": len(items) - idx,
+                "url": it.get("url", ""),
+            })
+        return out
 
     async def save_hotspots(self, db, hotspots: dict[str, list[dict]]) -> None:
         """覆盖写库：清空旧数据后批量插入（用户要求『下次更新直接覆盖』）

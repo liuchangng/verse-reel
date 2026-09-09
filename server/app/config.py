@@ -241,6 +241,13 @@ class Settings(BaseSettings):
     # 设为 ["douyin"] 可退回单平台模式。渲染阶段按此列表为每个平台生成对应尺寸视频。
     output_platforms: list[str] = Field(default=["douyin", "xiaohongshu", "kuaishou", "bilibili"])
 
+    # ====== 热点源配置 ======
+    # NewsNow 自部署聚合服务（github.com/ourongxing/newsnow，Docker 一条命令），
+    # 作为热搜主源：统一 JSON、上游适配由社区维护、失败自动旧缓存兜底。
+    # 平台 key 与 NewsNow 源 id 同名（weibo/zhihu/douyin/baidu/bilibili）。
+    # 置空字符串则不启用，直接走各平台前端接口直连。
+    newsnow_base_url: str = Field(default="http://localhost:4444")
+
     # ====== 通用配置 ======
     critic_concurrency: int = Field(default=5)
     script_score_threshold: float = Field(default=7.0)
