@@ -318,9 +318,15 @@ class HotspotService:
                 except Exception as e:
                     logger.warning(f"抓取 {platform} 热搜失败: {e}, 使用备用数据")
 
-            # 最后兜底：静态数据（仅冷启动/全源失败时，防止结果列表为空）
+            # 最后兜底：静态数据（仅冷启动/全源失败时，防止结果列表为空）。
+            # 打 _is_fallback 标记：save_hotspots 会跳过这些条目，
+            # 静态假数据不得覆盖库里上次真实抓取（2026-09-09 问题 3-②兜底不固化）。
             if items is None:
-                items = FALLBACK_HOTSPOTS.get(platform, [])[:limit]
+                items = [
+                    {**it, "_is_fallback": True}
+                    for it in FALLBACK_HOTSPOTS.get(platform, [])[:limit]
+                ]
+                logger.warning(f"{platform} 全源失败，使用静态兜底数据（不落库）")
 
             results[platform] = [
                 {
@@ -328,6 +334,7 @@ class HotspotService:
                     "hot": item.get("hot", 0),
                     "url": item.get("url", ""),
                     "platform": source["name"],
+                    "_is_fallback": item.get("_is_fallback", False),
                 }
                 for item in items
             ]
@@ -365,14 +372,38 @@ class HotspotService:
         return out
 
     async def save_hotspots(self, db, hotspots: dict[str, list[dict]]) -> None:
-        """覆盖写库：清空旧数据后批量插入（用户要求『下次更新直接覆盖』）
+        """覆盖写库：按平台清空后批量插入（用户要求『下次更新直接覆盖』）。
+
+        兜底不固化（2026-09-09 问题 3-②）：
+        - 带 ``_is_fallback`` 的条目（静态 FALLBACK 数据）跳过不写，
+          防止静态假数据覆盖库里上次真实抓取；
+        - 改为**按平台** DELETE：某平台本次全为兜底数据时该平台整表保留
+          （旧版全局 DELETE 会把未刷新平台的旧真实数据一并清掉）；
+        - 全部平台都无可写数据时跳过整个写库（保留现状）。
 
         Args:
             db: AsyncSession
-            hotspots: {platform: [{title, hot, url, recommended_poems:[id...]}, ...]}
+            hotspots: {platform: [{title, hot, url, recommended_poems:[id...],
+                                   _is_fallback?: bool}, ...]}
         """
-        await db.execute(text("DELETE FROM hotspots"))
+        writable: dict[str, list[dict]] = {}
+        skipped: list[str] = []
         for platform, items in hotspots.items():
+            real = [it for it in items if not it.get("_is_fallback")]
+            if real:
+                writable[platform] = real
+            elif items:
+                skipped.append(platform)
+        if skipped:
+            logger.warning(f"以下平台本次仅静态兜底数据，跳过写库（保留库内上次真实数据）: {skipped}")
+        if not writable:
+            logger.warning("本次抓取全部为兜底数据，hotspots 表不做任何变更")
+            return
+
+        for platform, items in writable.items():
+            await db.execute(
+                text("DELETE FROM hotspots WHERE platform = :p"), {"p": platform}
+            )
             for item in items:
                 recs = item.get("recommended_poems") or []
                 db.add(Hotspot(

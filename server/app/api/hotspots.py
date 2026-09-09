@@ -30,12 +30,15 @@ async def _background_refresh(platform_list: list[str], limit: int):
                         "url": item.get("url", ""),
                         "recommended_poems": recs,
                         "_rec_ids": [r["id"] for r in recs],
+                        # 兜底标记透传：save_hotspots 跳过静态数据，不覆盖库内真实抓取
+                        "_is_fallback": item.get("_is_fallback", False),
                     })
             save_struct = {
                 platform: [
                     {
                         "title": it["title"], "hot": it["hot"], "url": it["url"],
                         "recommended_poems": it["_rec_ids"],
+                        "_is_fallback": it.get("_is_fallback", False),
                     }
                     for it in items
                 ]
