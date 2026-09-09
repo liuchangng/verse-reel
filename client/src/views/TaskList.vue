@@ -99,6 +99,13 @@
           </tr>
         </tbody>
       </table>
+
+      <!-- 分页 -->
+      <div class="pagination" v-if="totalPages > 1">
+        <button class="page-btn" :disabled="page <= 1" @click="changePage(page - 1)">上一页</button>
+        <span class="page-info">第 {{ page }} / {{ totalPages }} 页 · 共 {{ total }} 条</span>
+        <button class="page-btn" :disabled="page >= totalPages" @click="changePage(page + 1)">下一页</button>
+      </div>
     </div>
 
     <!-- 加载中 -->
@@ -124,9 +131,17 @@ const router = useRouter()
 const tasks = ref([])
 const loading = ref(true)
 
+// 分页（后端 list 接口支持 page/page_size 并返回 total）
+const page = ref(1)
+const pageSize = 20
+const total = ref(0)
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+
 // 统计数据
+// 注意：「全部任务」用后端返回的 total（跨全部分页的总数）；
+// 其余 4 项为当前页分布（后端未提供按状态的总数，暂以当前页计）。
 const stats = computed(() => {
-  const s = { total: tasks.value.length, done: 0, processing: 0, failed: 0, pendingReview: 0 }
+  const s = { total: total.value, done: 0, processing: 0, failed: 0, pendingReview: 0 }
   for (const t of tasks.value) {
     if (t.status === 'done') s.done++
     else if (t.status === 'processing') s.processing++
@@ -136,17 +151,26 @@ const stats = computed(() => {
   return s
 })
 
-// 获取任务列表
+// 获取任务列表（分页）
 const fetchTasks = async () => {
   loading.value = true
   try {
-    const data = await api.getTasks()
+    const data = await api.getTasks({ page: page.value, page_size: pageSize })
     tasks.value = data.items || []
+    total.value = data.total || 0
   } catch (error) {
     console.error('获取任务列表失败', error)
   } finally {
     loading.value = false
   }
+}
+
+// 翻页
+const changePage = (p) => {
+  const target = Math.min(Math.max(1, p), totalPages.value)
+  if (target === page.value) return
+  page.value = target
+  fetchTasks()
 }
 
 // 阶段标签
@@ -214,6 +238,8 @@ const deleteTask = async (task) => {
   if (!ok) return
   try {
     await api.deleteTask(task.id)
+    // 删空当前页且不在第一页时回退到上一页，避免停留在无数据的末页
+    if (tasks.value.length === 1 && page.value > 1) page.value -= 1
     await fetchTasks()
   } catch (error) {
     alert('删除失败：' + (error.message || error))
@@ -268,6 +294,13 @@ onMounted(() => fetchTasks())
 .poem-author { font-size: 12px; color: var(--color-text-muted); }
 .col-time { color: var(--color-text-muted); font-size: 13px; white-space: nowrap; }
 .col-action { white-space: nowrap; }
+
+/* 分页 */
+.pagination { display: flex; align-items: center; justify-content: center; gap: var(--spacing-3); padding: var(--spacing-3) var(--spacing-4); border-top: 1px solid var(--color-border-light); background: #faf8f5; }
+.page-btn { padding: 4px 14px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-card); color: var(--color-text-secondary); font-size: 13px; cursor: pointer; transition: all 0.15s; }
+.page-btn:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-bg); }
+.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-info { font-size: 13px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
 
 /* 阶段 badge */
 .stage-badge { display: inline-block; padding: 2px 10px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 500; background: rgba(201, 166, 107, 0.1); color: #8b6914; }
