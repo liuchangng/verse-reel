@@ -248,6 +248,10 @@ class Settings(BaseSettings):
     # 置空字符串则不启用，直接走各平台前端接口直连。
     newsnow_base_url: str = Field(default="http://localhost:4444")
 
+    # 推荐质量池门槛（2026-09-09 问题 4b 源头打标）：召回只查 poems.quality_score >= 该值，
+    # 0 = 关闭质量池（回退全库召回）。当前库 quality>=55 约 5.9 万首。
+    poem_quality_threshold: int = Field(default=55)
+
     # ====== 视频片段配置 ======
     # agnes 视频片段（1 次/分钟限制）在成片中被 final.mp4（图片+TTS 幻灯片）完全覆盖
     # （见 pipeline._burn_subtitles 注释），默认关闭：流水线跳过 video 阶段，

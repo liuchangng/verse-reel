@@ -807,105 +807,134 @@ class HotspotService:
             precise_terms = list(keywords)
             expanded_terms = []
 
-        # --- 主路：精确词召回（高权重）+ 扩展词仅补位（2026-09-04 问题7） ---
-        # 精确标题词(jieba) 与金句(position='g') 走主路并主路评分排序取 Top-N；
-        # 扩展主题词(人生感悟/思乡/月亮 等宽泛标签) 不混入主路评分，仅当主路不足
-        # limit 时才补位——避免宽标签累积权重压过精确词，或作者名(苏轼)被内容误
-        # 命中污染池序（实测《燕魏杂记》吕颐浩因内容含"苏轼"被顶到定风波热点 Top1）。
+        # --- 主路：精确词召回（高权重）+ 扩展词补位 + poem_tags 补位 ---
+        # 质量池（2026-09-09 问题 4b，源头打标）：三阶段召回统一 JOIN poems 按
+        # quality_score >= settings.poem_quality_threshold 过滤（默认 55，约 5.9 万首），
+        # 推荐只在质量池里选，不在 200w 全量噪音里打捞。
+        # 严格召回不足 _QUALITY_RELAX_MIN 时降级全库补齐（宁缺毋滥 vs 可用性折中：
+        # 冷门检索词在质量池可能零命中，空池会让推荐完全失效）。
+        q_threshold = max(0, int(getattr(settings, "poem_quality_threshold", 55) or 0))
+        _QUALITY_RELAX_MIN = 10
         primary_ids: list[int] = []
 
-        # 1) 精确词主路（金句加权 3.0，普通精确词 1.0）
-        if precise_terms:
-            precise_expr = case((PoemTerm.position == "g", 3.0), else_=1.0)
-            stmt = (
-                select(
-                    PoemTerm.poem_id,
-                    func.sum(precise_expr).label("score"),
-                    func.count().label("hits"),
-                    func.sum(case((PoemTerm.position == "g", 1), else_=0)).label("golden_hits"),
-                )
-                .where(PoemTerm.term.in_(precise_terms))
-                .group_by(PoemTerm.poem_id)
-                .order_by(func.sum(precise_expr).desc())
-                .limit(limit)
-            )
-            try:
-                result = await db.execute(stmt)
-                rows = result.fetchall()
-                primary_ids = [row[0] for row in rows]
-                scored = [(row[0], row[1], row[2], row[3]) for row in rows]
-                logger.info(
-                    f"_rule_candidates 精确词召回 {len(primary_ids)} 首，"
-                    f"top5 评分明细: {[(pid, round(sc, 1), h, gh) for pid, sc, h, gh in scored[:5]]}"
-                )
-            except Exception as e:
-                # 主路失效 = 推荐退化为纯名望兜底（主题相关性全丢），属严重降级而非可忽略告警，
-                # 故用 error + 堆栈保证可观测。此处不重抛，是为了让 fame 兜底仍能产出候选，
-                # 保住接口可用性（2026-09-04: 曾因漏 import `case` 使主路静默失效未被发现）。
-                logger.error(f"倒排表精确词初筛失败（主路召回失效，将退化为名望兜底）: {e}", exc_info=True)
+        async def _recall_terms(quality: bool) -> int:
+            """执行三阶段召回并追加进 primary_ids，返回本次新增数。
 
-        # 2) 扩展主题词仅补位：主路不足 limit 时才用宽标签填充剩余配额
-        if expanded_terms and len(primary_ids) < limit:
-            gap = limit - len(primary_ids)
-            stmt2 = (
-                select(PoemTerm.poem_id, func.count().label("hits"))
-                .where(PoemTerm.term.in_(expanded_terms))
-                .group_by(PoemTerm.poem_id)
-                .order_by(func.count().desc())
-                .limit(gap)
-            )
-            try:
-                result2 = await db.execute(stmt2)
-                added = 0
-                for (pid, _hits) in result2.fetchall():
-                    if pid not in primary_ids:
-                        primary_ids.append(pid)
-                        added += 1
-                        if len(primary_ids) >= limit:
-                            break
-                logger.info(f"_rule_candidates 扩展词补位 {added} 首（主路缺口 {gap}）")
-            except Exception as e:
-                logger.error(f"倒排表扩展词补位失败: {e}", exc_info=True)
+            quality=True 时按 quality_score >= q_threshold 过滤（NULL=未回填不放过）。
+            """
+            th = q_threshold if quality else 0
+            before = len(primary_ids)
 
-        # 3) #20260904-E2E-问题4 修复：poem_tags 标签补位
-        #    根因：poem_tags 表有 926K 条标签（中秋 10,993 首、重阳 20,194 首、季节标签 1.6M 首），
-        #    但整个推荐链路从未消费该表，P1 ETL 做完但推荐没用上。
-        #    方案：追加第三阶段，用标签（tag）查 poem_tags 补位，权重 0.2（低于扩展词 0.3）。
-        #    语义：jieba 碎片（"月圆夜"）→ 扩展词命中（"月亮"）→ 仍可能召回低相关诗；
-        #          标签直查（"中秋"）→ 10,993 首明确标注诗 → 更高精度补位。
-        if len(primary_ids) < limit:
-            # 从 keywords 中提取可匹配标签：精确词(golden=3.0/普通=1.0) + 扩展词(0.3)
-            tag_candidates = []
-            for term, weight in keywords.items() if isinstance(keywords, dict) else []:
-                # 只取权重较高的关键词作为标签候选（避免噪音词进标签表）
-                if weight >= 0.3 and len(term) <= 10:
-                    tag_candidates.append(term)
-            # 去重并按权重降序排列，优先用高权重关键词
-            tag_candidates = list(dict.fromkeys(tag_candidates))[:20]
-            if tag_candidates and len(primary_ids) < limit:
-                tag_gap = limit - len(primary_ids)
-                try:
-                    stmt3 = (
-                        select(PoemTag.poem_id, func.count().label("tag_hits"))
-                        .where(PoemTag.tag.in_(tag_candidates))
-                        .group_by(PoemTag.poem_id)
-                        .order_by(func.count().desc())
-                        .limit(tag_gap * 2)  # 多查一些再过滤，防止去重后不够
+            def _q(stmt, join_col):
+                """按需附加质量过滤 JOIN（join_col: PoemTerm.poem_id / PoemTag.poem_id）。"""
+                if th > 0:
+                    stmt = stmt.join(Poem, join_col == Poem.id).where(Poem.quality_score >= th)
+                return stmt
+
+            # 1) 精确词主路（金句加权 3.0，普通精确词 1.0）
+            if precise_terms:
+                precise_expr = case((PoemTerm.position == "g", 3.0), else_=1.0)
+                stmt = _q(
+                    select(
+                        PoemTerm.poem_id,
+                        func.sum(precise_expr).label("score"),
+                        func.count().label("hits"),
+                        func.sum(case((PoemTerm.position == "g", 1), else_=0)).label("golden_hits"),
                     )
-                    result3 = await db.execute(stmt3)
+                    .where(PoemTerm.term.in_(precise_terms))
+                    .group_by(PoemTerm.poem_id)
+                    .order_by(func.sum(precise_expr).desc())
+                    .limit(limit),
+                    PoemTerm.poem_id,
+                )
+                try:
+                    result = await db.execute(stmt)
+                    rows = result.fetchall()
+                    for row in rows:
+                        if row[0] not in primary_ids:
+                            primary_ids.append(row[0])
+                    scored = [(row[0], row[1], row[2], row[3]) for row in rows]
+                    logger.info(
+                        f"_rule_candidates 精确词召回 {len(rows)} 首（质量过滤={'开' if th else '关'}），"
+                        f"top5 评分明细: {[(pid, round(sc, 1), h, gh) for pid, sc, h, gh in scored[:5]]}"
+                    )
+                except Exception as e:
+                    # 主路失效 = 推荐退化为纯名望兜底（主题相关性全丢），属严重降级而非可忽略告警，
+                    # 故用 error + 堆栈保证可观测。此处不重抛，是为了让 fame 兜底仍能产出候选，
+                    # 保住接口可用性（2026-09-04: 曾因漏 import `case` 使主路静默失效未被发现）。
+                    logger.error(f"倒排表精确词初筛失败（主路召回失效，将退化为名望兜底）: {e}", exc_info=True)
+
+            # 2) 扩展主题词仅补位：主路不足 limit 时才用宽标签填充剩余配额
+            if expanded_terms and len(primary_ids) < limit:
+                gap = limit - len(primary_ids)
+                stmt2 = _q(
+                    select(PoemTerm.poem_id, func.count().label("hits"))
+                    .where(PoemTerm.term.in_(expanded_terms))
+                    .group_by(PoemTerm.poem_id)
+                    .order_by(func.count().desc())
+                    .limit(gap),
+                    PoemTerm.poem_id,
+                )
+                try:
+                    result2 = await db.execute(stmt2)
                     added = 0
-                    for (pid, _tag_hits) in result3.fetchall():
+                    for (pid, _hits) in result2.fetchall():
                         if pid not in primary_ids:
                             primary_ids.append(pid)
                             added += 1
                             if len(primary_ids) >= limit:
                                 break
-                    logger.info(
-                        f"_rule_candidates poem_tags 补位 {added} 首 "
-                        f"(标签候选 {len(tag_candidates)} 个，主路缺口 {tag_gap})"
-                    )
+                    logger.info(f"_rule_candidates 扩展词补位 {added} 首（主路缺口 {gap}）")
                 except Exception as e:
-                    logger.error(f"poem_tags 补位失败: {e}", exc_info=True)
+                    logger.error(f"倒排表扩展词补位失败: {e}", exc_info=True)
+
+            # 3) #20260904-E2E-问题4 修复：poem_tags 标签补位
+            #    语义：jieba 碎片（"月圆夜"）→ 扩展词命中（"月亮"）→ 仍可能召回低相关诗；
+            #          标签直查（"中秋"）→ 明确标注诗 → 更高精度补位。
+            if len(primary_ids) < limit:
+                # 从 keywords 中提取可匹配标签：精确词(golden=3.0/普通=1.0) + 扩展词(0.3)
+                tag_candidates = []
+                for term, weight in keywords.items() if isinstance(keywords, dict) else []:
+                    # 只取权重较高的关键词作为标签候选（避免噪音词进标签表）
+                    if weight >= 0.3 and len(term) <= 10:
+                        tag_candidates.append(term)
+                # 去重并按权重降序排列，优先用高权重关键词
+                tag_candidates = list(dict.fromkeys(tag_candidates))[:20]
+                if tag_candidates and len(primary_ids) < limit:
+                    tag_gap = limit - len(primary_ids)
+                    try:
+                        stmt3 = _q(
+                            select(PoemTag.poem_id, func.count().label("tag_hits"))
+                            .where(PoemTag.tag.in_(tag_candidates))
+                            .group_by(PoemTag.poem_id)
+                            .order_by(func.count().desc())
+                            .limit(tag_gap * 2)  # 多查一些再过滤，防止去重后不够
+                            ,
+                            PoemTag.poem_id,
+                        )
+                        result3 = await db.execute(stmt3)
+                        added = 0
+                        for (pid, _tag_hits) in result3.fetchall():
+                            if pid not in primary_ids:
+                                primary_ids.append(pid)
+                                added += 1
+                                if len(primary_ids) >= limit:
+                                    break
+                        logger.info(
+                            f"_rule_candidates poem_tags 补位 {added} 首 "
+                            f"(标签候选 {len(tag_candidates)} 个，主路缺口 {tag_gap})"
+                        )
+                    except Exception as e:
+                        logger.error(f"poem_tags 补位失败: {e}", exc_info=True)
+            return len(primary_ids) - before
+
+        await _recall_terms(quality=(q_threshold > 0))
+        # 质量池严格召回不足 → 降级全库补齐（保可用性）
+        if q_threshold > 0 and len(primary_ids) < _QUALITY_RELAX_MIN:
+            logger.info(
+                f"质量池(>={q_threshold})召回仅 {len(primary_ids)} 首 < {_QUALITY_RELAX_MIN}，降级全库召回补齐"
+            )
+            await _recall_terms(quality=False)
 
         # --- C 兜底：名望 S/A 档作者的代表作（fame>=70 且 normal）---
         # 即使倒排召回满 200 首，也确保名家的标志性作品有机会进入候选池，

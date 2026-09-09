@@ -34,6 +34,8 @@ WRITABLE_KEYS: tuple[str, ...] = (
     # 通用
     "critic_concurrency", "script_score_threshold",
     "image_score_threshold", "max_retries",
+    # 推荐质量池门槛（源头打标 4b，2026-09-09）
+    "poem_quality_threshold",
     # TTS / 字幕（独立服务/资源）
     "tts_concurrency", "subtitle_concurrency",
     # 多平台输出（设置页"发布平台"多选，默认全选；渲染阶段实际使用的平台集合）
