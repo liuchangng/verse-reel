@@ -141,7 +141,7 @@
               <!-- 每次尝试的历史记录（max_retries=3 → 最多 3 条失败 + 1 条成功） -->
               <div v-for="(a, i) in job.attempts_log" :key="i"
                    :class="['attempt-line', a.ok ? 'attempt-ok' : 'attempt-fail']">
-                第 {{ a.attempt }} 次尝试 {{ a.ok ? '✅ 成功' : '❌ 失败' }}
+                第 {{ i + 1 }} 次尝试 {{ a.ok ? '✅ 成功' : '❌ 失败' }}
                 <span class="attempt-time">{{ formatTime(a.at) }}</span>
                 <div v-if="a.error" class="attempt-error">{{ a.error }}</div>
               </div>

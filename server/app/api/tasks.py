@@ -321,26 +321,35 @@ async def get_task_jobs(task_id: int, db: AsyncSession = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    res = await db.execute(select(Job).where(Job.task_id == task_id))
-    jobs = {j.stage: j for j in res.scalars().all()}
+    res = await db.execute(
+        select(Job).where(Job.task_id == task_id).order_by(Job.id.asc())
+    )
+    # 同一阶段可能有多条 Job（重新生成保留终态旧 Job 作历史）：按阶段聚合，
+    # 尝试日志按 Job.id 顺序拼接（追加语义），状态/错误/起止取最新一条。
+    by_stage: dict[str, list[Job]] = {}
+    for j in res.scalars().all():
+        by_stage.setdefault(j.stage, []).append(j)
 
     out = []
     for stage in STAGE_ORDER:
-        j = jobs.get(stage)
-        if j is None:
+        group = by_stage.get(stage)
+        if not group:
             continue
-        try:
-            attempts_log = json.loads(j.attempts_log) if j.attempts_log else []
-        except (json.JSONDecodeError, TypeError):
-            attempts_log = []
+        latest = group[-1]
+        attempts_log = []
+        for j in group:
+            try:
+                attempts_log.extend(json.loads(j.attempts_log) if j.attempts_log else [])
+            except (json.JSONDecodeError, TypeError):
+                pass
         out.append({
-            "stage": j.stage,
-            "status": j.status,
-            "attempts": j.attempts or 0,
+            "stage": stage,
+            "status": latest.status,
+            "attempts": sum((j.attempts or 0) for j in group),
             "attempts_log": attempts_log,
-            "last_error": j.last_error,
-            "started_at": j.started_at.isoformat() if j.started_at else None,
-            "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+            "last_error": latest.last_error,
+            "started_at": latest.started_at.isoformat() if latest.started_at else None,
+            "finished_at": latest.finished_at.isoformat() if latest.finished_at else None,
         })
     return {"task_id": task_id, "task_status": task.status, "jobs": out}
 
