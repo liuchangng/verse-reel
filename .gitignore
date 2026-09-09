@@ -8,6 +8,9 @@ venv/
 env/
 .env
 
+# pytest 缓存（根目录 stray + server 下，统一不纳入版本控制）
+.pytest_cache/
+
 # Database
 *.db
 *.sqlite
