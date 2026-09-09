@@ -453,7 +453,10 @@ const regenerateOneShot = async (idx) => {
   }
 }
 const regenerateTask = async () => {
-  try { await api.regenerateTask(taskId.value, task.value.current_stage); await loadTask() }
+  // 任务完成后 current_stage 会是 "done"（非法 stage，后端 400），
+  // 此时重跑整条流水线；进行中任务按当前 stage 重跑。
+  const stage = task.value.current_stage === 'done' ? 'all' : task.value.current_stage
+  try { await api.regenerateTask(taskId.value, stage); await loadTask() }
   catch(e) {}
 }
 
