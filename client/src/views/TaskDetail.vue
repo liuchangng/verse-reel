@@ -375,8 +375,8 @@ const derivedVideoStatus = computed(() => {
   return 'pending'
 })
 
-// ====== 时间格式化 ======
-const formatTime = (t) => t ? new Date(t).toLocaleString('zh-CN') : '-'
+// ====== 时间格式化（统一走 utils/time.js：UTC 解析 + 补零 YYYY-MM-DD HH:mm:ss） ======
+import { formatDateTime as formatTime } from '../utils/time'
 
 // ====== 多平台成片 ======
 // task.platform_outputs 为 JSON map: {platform: url}；video_url 作主平台兜底

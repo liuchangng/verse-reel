@@ -269,13 +269,8 @@ const getDynastyBadge = (task) => {
 // 是否可发布
 const canPublish = (task) => task.status === 'done' && task.video_url
 
-// 格式化时间
-const formatTime = (time) => {
-  if (!time) return '-'
-  const d = new Date(time)
-  const pad = n => String(n).padStart(2, '0')
-  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
+// 格式化时间（统一走 utils/time.js：UTC 解析 + 补零 YYYY-MM-DD HH:mm:ss）
+import { formatDateTime as formatTime } from '../utils/time'
 
 // 查看详情
 const viewDetail = (task) => router.push(`/tasks/${task.id}`)

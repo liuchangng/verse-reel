@@ -215,11 +215,13 @@ const getHotspotBadgeText = (hot) => {
   return '🔵 热门'
 }
 
-// 格式化时间
+// 格式化时间（统一走 utils/time.js：补零 HH:mm:ss，与任务列表格式一致）
+import { parseDbTime } from '../utils/time'
 const formatTime = (time) => {
-  if (!time) return ''
-  const d = new Date(time)
-  return d.toLocaleTimeString('zh-CN')
+  const d = parseDbTime(time)
+  if (!d) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 // 打开创建任务弹窗（source: 来源热点 {title, keywords}；Top 榜/无热点来源传 null）
