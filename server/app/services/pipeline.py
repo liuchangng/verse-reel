@@ -932,16 +932,31 @@ class PipelineEngine:
                 segs.append({"index": i, "text": text})
         if not segs:
             return {"success": False, "error": "无旁白文本"}
-        # 复用已有分段（重跑安全）
+        # 复用已有分段（重跑安全）。复用校验四条全过才可复用：
+        # 条数一致 / 逐条文本一致（文案改了不得复用旧旁白）/ 文件存在 /
+        # 非静音兜底（fallback 标记或 -80dB 以下数字静音，防历史兜底文件毒化成片）。
         seg_json = output_dir / "tts_segments.json"
         if not force and seg_json.exists():
             try:
                 existing = json.loads(seg_json.read_text(encoding="utf-8"))
-                if len(existing) == len(segs) and all(
-                    Path(s.get("path", "")).exists() for s in existing
-                ):
-                    logger.info(f"task{task.id} TTS 分段已存在，复用")
-                    return await self._finalize_tts(task, existing, output_dir)
+                if len(existing) == len(segs):
+                    stale = [
+                        s.get("index") for s in existing
+                        if s.get("fallback")
+                        or not Path(s.get("path", "")).exists()
+                        or (s.get("text") or "") != next(
+                            (g["text"] for g in segs if g["index"] == s.get("index")), None
+                        )
+                        or self._is_silent_audio(s.get("path", ""))
+                    ]
+                    if stale:
+                        logger.warning(
+                            "task%s TTS 分段含静音/兜底/过期片段 %s，全部重新生成",
+                            task.id, stale,
+                        )
+                    else:
+                        logger.info(f"task{task.id} TTS 分段已存在，复用")
+                        return await self._finalize_tts(task, existing, output_dir)
             except Exception as exc:
                 logger.warning("task%s 复用 TTS 分镜校验失败: %s", task.id, exc)
         if not await tts_client.health_check():
@@ -1021,8 +1036,13 @@ class PipelineEngine:
                     logger.warning(f"TTS 镜 {idx} 第{attempt}次失败: {last_err}，重试")
                     await asyncio.sleep(2 * attempt)
                 if not ok:
-                    # 兜底：生成静音片段，确保该镜画面/字幕不丢失、序号不偏移
-                    logger.error(f"TTS 镜 {idx} 最终失败，生成静音兜底片段: {last_err}")
+                    # 兜底：生成静音片段，确保该镜画面/字幕不丢失、序号不偏移。
+                    # 打 fallback 标记：下次复用校验会拒绝并重新生成（2026-09-09
+                    # 事故——静音兜底文件被无限复用，成片全程无声）。
+                    logger.error(
+                        f"TTS 镜 {idx} 最终失败，生成静音兜底片段（已标记 fallback，"
+                        f"下次重新生成将自动重试本镜）: {last_err}"
+                    )
                     est = max(1.5, len(text) / 4.0)
                     try:
                         sil = await asyncio.to_thread(
@@ -1034,6 +1054,8 @@ class PipelineEngine:
                         )
                         if sil.returncode == 0 and local.exists():
                             results[idx] = {"index": idx, "text": text,
+                                            "fallback": True,
+                                            "error": str(last_err),
                                             "duration": round(est, 2), "path": str(local)}
                     except Exception as e2:
                         logger.error(f"镜 {idx} 静音兜底也失败: {e2}")
@@ -1470,6 +1492,28 @@ class PipelineEngine:
             f"loudnorm=I=-14:TP=-1:LRA=11,"
             f"aresample={sr}:resampler=soxr"
         )
+
+    @staticmethod
+    def _is_silent_audio(path: str | Path) -> bool:
+        """检测音频是否为数字静音（max_volume <= -80dB，anullsrc 兜底产物特征）。
+
+        用于 TTS 分段复用校验：历史上静音兜底文件（TTS 3 连失败时 anullsrc 生成）
+        因"文件存在"被无限复用，成片全程无声。解码失败/无音轨按非静音处理
+        （交由调用方其他校验把关），避免误杀正常片段。
+        """
+        p = Path(path)
+        if not p.exists() or p.stat().st_size == 0:
+            return False
+        try:
+            res = subprocess.run(
+                [settings.ffmpeg_path, "-hide_banner", "-i", str(p),
+                 "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=30,
+            )
+            m = re.search(r"max_volume:\s*(-?[\d.]+)\s*dB", res.stderr)
+            return bool(m) and float(m.group(1)) <= -80.0
+        except Exception:
+            return False
 
     @staticmethod
     def _clean_audio(src: Path, dst: Path, sr: int = 24000, noise_reduce: bool = True) -> bool:
