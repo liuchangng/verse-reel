@@ -321,16 +321,35 @@ class QueueService:
                 await asyncio.sleep(self._poll_interval)
 
     async def _claim_and_dispatch(self) -> int:
-        """扫描待办 Job，认领一个可执行的（依赖满足 + 阶段并发未满），派发执行。"""
+        """扫描待办 Job，认领一个可执行的（依赖满足 + 阶段并发未满），派发执行。
+
+        任务间串行（用户定夺 2026-09-09）：一次只推进一个任务——
+        有在跑的 Job 时只认领该任务的后续 Job；空闲时按
+        priority desc, created_at asc 选出下一个要跑的任务。
+        资源有限（RPM 限流/视频 1 次/分钟），跨任务并行只会互相抢配额、日志穿插。
+        """
         async with async_session_factory() as session:
             res = await session.execute(
                 select(Job)
                 .where(Job.status == "pending")
-                .order_by(Job.priority.desc(), Job.created_at.asc())
+                # id 兜底排序：同秒入队的 Job created_at 相同（SQLite 秒级精度），
+                # 无 id 时先后顺序不稳定
+                .order_by(Job.priority.desc(), Job.created_at.asc(), Job.id.asc())
             )
             candidates = res.scalars().all()
             if not candidates:
                 return 0
+
+            # 任务间串行：锁定"当前活动任务"
+            if running_jobs := (await session.execute(
+                select(Job)
+                .where(Job.status == "running")
+                .order_by(Job.started_at.asc(), Job.id.asc())
+            )).scalars().all():
+                active_task_id = running_jobs[0].task_id
+            else:
+                active_task_id = candidates[0].task_id
+            candidates = [j for j in candidates if j.task_id == active_task_id]
 
             for job in candidates:
                 sem = self._sems[job.stage]
@@ -361,7 +380,8 @@ class QueueService:
         永久阻塞在 pending。仅靠入队时的 ``_expand_prereqs`` 救不了已经
         入队的存量 Job，所以消费者侧需要自愈。
 
-        防死循环：已经 **failed** 过的前置阶段不再重复补建。
+        防死循环：已经 **failed** 的前置阶段不补建，改为级联失败本任务
+        全部 pending Job（见 ``_cascade_fail_pending``），让任务干净落终态。
         """
         prereqs = STAGE_PREREQS.get(job.stage, set())
         if not prereqs:
@@ -386,11 +406,12 @@ class QueueService:
             if st in active:
                 continue  # 已在途，等它跑完
             if st in failed:
-                logger.warning(
-                    f"⚠ task={job.task_id} 前置 {st} 曾失败，不自动补建"
-                    f"（{job.stage} 将保持阻塞，需人工处理）"
-                )
-                continue
+                # 前置已永久失败 → 任务注定无法推进。级联失败本任务全部
+                # pending Job（2026-09-09 用户定夺：UI 已显示失败，任务直接挂掉，
+                # 不留僵尸 Job 每 2s 刷一条"不自动补建"警告）。
+                # 重生成时 enqueue_task 会清掉旧 Job 重建，因此级联失败可安全覆盖。
+                await self._cascade_fail_pending(session, job.task_id, reason=f"前置阶段 {st} 永久失败")
+                return
             session.add(
                 Job(
                     task_id=job.task_id,
@@ -407,6 +428,28 @@ class QueueService:
                 f"🩹 自愈入队 task={job.task_id}: 补建缺失前置 {created}"
                 f"（由 {job.stage} 触发）"
             )
+
+    async def _cascade_fail_pending(self, session: AsyncSession, task_id: int, reason: str) -> None:
+        """级联失败：把任务全部 pending Job 置 failed 并落任务终态。
+
+        触发条件：任一前置阶段已永久失败（重试耗尽），任务不可能推进。
+        幂等：没有 pending Job 时什么都不做（不会反复刷日志）。
+        """
+        res = await session.execute(
+            select(Job).where(Job.task_id == task_id, Job.status == "pending")
+        )
+        zombies = res.scalars().all()
+        if not zombies:
+            return
+        for j in zombies:
+            j.status = "failed"
+            j.last_error = f"[级联失败] {reason}"
+            j.finished_at = datetime.now(timezone.utc)
+        await session.commit()
+        logger.warning(
+            f"⚰ task={task_id} 前置永久失败，级联失败 {len(zombies)} 个 pending Job: {reason}"
+        )
+        await self._maybe_finalize(session, task_id)
 
     async def _deps_satisfied(self, session: AsyncSession, job: Job) -> bool:
         """依赖是否全部满足：检查 task 实际产物是否存在。
