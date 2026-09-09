@@ -349,6 +349,28 @@ class QueueService:
                 active_task_id = running_jobs[0].task_id
             else:
                 active_task_id = candidates[0].task_id
+
+            # 孤儿防御（2026-09-09 事故）：活动任务的 Task 记录已被删除（如用户
+            # 删任务后子表 Job 未级联清理的存量数据），其 pending Job 依赖检查
+            # 永远失败但永远占着"活动任务"位置（按优先级它总排第一），把其他
+            # 任务全部饿死。这里直接清掉孤儿 pending Job，下一轮自然轮到别的任务。
+            if await session.get(Task, active_task_id) is None:
+                orphan = (await session.execute(
+                    select(Job).where(
+                        Job.task_id == active_task_id, Job.status == "pending"
+                    )
+                )).scalars().all()
+                if orphan:
+                    for j in orphan:
+                        await session.delete(j)
+                    await session.commit()
+                    logger.warning(
+                        "🧹 孤儿清理：task=%s 已不存在，删除 %s 个 pending Job"
+                        "（防饿死其他任务）",
+                        active_task_id, len(orphan),
+                    )
+                return 0
+
             candidates = [j for j in candidates if j.task_id == active_task_id]
 
             for job in candidates:

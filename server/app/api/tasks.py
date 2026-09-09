@@ -387,6 +387,13 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
     if task.status == "processing":
         raise HTTPException(status_code=400, detail="无法删除执行中的任务")
     
+    # 级联删除子表记录（2026-09-09 事故修复）：generation_jobs / scripts 无
+    # DB 外键级联，漏删会留下孤儿 Job —— 孤儿按优先级永远占据串行队列的
+    # "活动任务"位且永远不被消费，把其他任务的 Job 全部饿死。
+    from sqlalchemy import delete as sa_delete
+    from app.models.script import Script
+    await db.execute(sa_delete(Job).where(Job.task_id == task_id))
+    await db.execute(sa_delete(Script).where(Script.task_id == task_id))
     await db.delete(task)
     await db.commit()
     # 级联清理产物目录（失败仅告警，不阻断删除成功返回）

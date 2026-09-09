@@ -146,3 +146,31 @@ async def test_running_job_blocks_other_tasks(queue_env):
     await _mk_job(factory, 2, "script")
 
     assert await svc._claim_and_dispatch() == 0, "在跑任务存在时不得认领其他任务的 Job"
+
+
+@pytest.mark.asyncio()
+async def test_orphan_pending_jobs_cleaned_not_starving(queue_env):
+    """孤儿防御（2026-09-09 事故）：活动任务的 Task 已被删除 → 其 pending Job
+    被直接清理，队列下一轮正常推进其他任务，不再被永久饿死。
+
+    事故还原：用户删除 task2（旧版 delete 漏级联），其高优先级 pending Job
+    永远占据串行队列"活动任务"位且依赖检查永远失败，task1 的 video Job 饿死 8h+。
+    """
+    svc, factory = queue_env
+    await _mk_task(factory, 1)
+    # task1 已有定妆照 → video 的前置（image）视为已满足，聚焦孤儿清理逻辑
+    async with factory() as s:
+        t = await s.get(Task, 1)
+        t.character_ref = "https://example.com/ref.png"
+        await s.commit()
+    # task2 不存在（已被删除），但其 pending Job 还在（存量脏数据）
+    orphan_id = await _mk_job(factory, 2, "character")   # priority 55，排 task1 前面
+    await _mk_job(factory, 1, "video")                    # priority 10
+
+    # 第一轮：候选第一名是 task2 的孤儿 → 清理，不派发
+    assert await svc._claim_and_dispatch() == 0
+    async with factory() as s:
+        assert await s.get(Job, orphan_id) is None, "孤儿 pending Job 应被清理"
+
+    # 第二轮：孤儿已清，task1 的 video 正常被认领（不被饿死）
+    assert await svc._claim_and_dispatch() == 1, "清理孤儿后，其他任务必须能正常推进"
