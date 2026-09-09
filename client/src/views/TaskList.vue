@@ -89,6 +89,12 @@
             <td class="col-action">
               <button class="btn btn-sm btn-ghost" @click="viewDetail(task)">详情 →</button>
               <button v-if="canPublish(task)" class="btn btn-sm btn-primary" @click="publishTask(task)">发布</button>
+              <button
+                class="btn btn-sm btn-danger"
+                :disabled="task.status === 'processing'"
+                :title="task.status === 'processing' ? '任务执行中，无法删除' : '删除任务（含数据库记录与图片/视频产物）'"
+                @click="deleteTask(task)"
+              >删除</button>
             </td>
           </tr>
         </tbody>
@@ -199,6 +205,21 @@ const publishTask = async (task) => {
   }
 }
 
+// 删除（二次确认：后端会级联清理数据库记录 + 图片/视频产物目录）
+const deleteTask = async (task) => {
+  const ok = confirm(
+    `确定删除任务 #${task.id}「${task.poem_title}」？\n\n` +
+    '将删除该任务的数据库记录，并清理已生成的图片 / 视频 / 音频等产物文件。此操作不可恢复。'
+  )
+  if (!ok) return
+  try {
+    await api.deleteTask(task.id)
+    await fetchTasks()
+  } catch (error) {
+    alert('删除失败：' + (error.message || error))
+  }
+}
+
 onMounted(() => fetchTasks())
 </script>
 
@@ -273,6 +294,12 @@ onMounted(() => fetchTasks())
 /* 按钮 */
 .btn-ghost { background: transparent; border: 1px solid var(--color-border); color: var(--color-text-secondary); }
 .btn-ghost:hover { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-bg); }
+
+/* 删除按钮（危险操作） */
+.btn-danger { background: transparent; border: 1px solid #ffa39e; color: #cf1322; }
+.btn-danger:hover { background: #fff1f0; border-color: #ff7875; color: #cf1322; }
+.btn-danger:disabled { opacity: 0.45; cursor: not-allowed; background: transparent; border-color: var(--color-border); color: var(--color-text-muted); }
+.btn-danger:disabled:hover { background: transparent; }
 
 /* 空状态 */
 .empty-state { text-align: center; padding: 80px 20px; background: var(--color-bg-card); border-radius: var(--radius-lg); border: 1px dashed var(--color-border); }
