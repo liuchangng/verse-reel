@@ -1,0 +1,5 @@
+# 批处理/命令行脚本强制 CRLF 行尾
+# cmd.exe 解析 .bat/.cmd 时多行 if (...) 块依赖 CRLF；纯 LF 会导致「命令语法不正确」。
+# 声明 text eol=crlf：仓库内统一存 LF，检出时强制展开为 CRLF（覆盖 clone/checkout 的 LF 回退）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
