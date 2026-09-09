@@ -285,10 +285,18 @@ class PipelineEngine:
                 task.error_message = f"文案评分未达标: {score.feedback}"
                 await db.commit()
                 return
-            # 文案变了 → 分镜与下游产物全部失效，清空让后续阶段重跑
+            # 文案变了 → 下游产物全部失效，清空让后续阶段重跑。
+            # 2026-09-09 任务001事故：旧版只清图片侧，残留的旧音频/旧视频既造成
+            # 前端"下游已完成"的乱序假象，也会被产物自检复用（旧片配新文案，内容
+            # 彻底脱节）。文案是全链源头，重跑即全链失效。
             task.storyboard = None
             task.character_ref = None
             task.image_urls = None
+            task.image_score = None
+            task.audio_url = None
+            task.video_url = None
+            task.video_duration = None
+            task.subtitle_url = None
             await db.commit()
 
             # 分镜（storyboard）是 script 阶段的产物之一（STAGE_OUTPUTS["script"]
@@ -367,10 +375,11 @@ class PipelineEngine:
                 logger.info(f"task{task_id} video 已存在，跳过 stage")
                 return
             image_urls = self._parse_json_list(task.image_urls)
-            if not image_urls and _have("character_ref"):
-                image_urls = [task.character_ref]
             if not image_urls:
-                raise RuntimeError("video 缺少前置 image 产物")
+                # 2026-09-09 任务001事故（用户定夺）：移除"定妆照兜底"——旧版在
+                # 分镜图缺失时拿定妆照凑一张图出片，视频与分镜/旁白彻底脱节，还
+                # 掩盖了 image 阶段的失败。fail-loud：缺分镜图就失败，原因可见。
+                raise RuntimeError("video 缺少前置 image 产物（分镜图为空），请先重跑图片生成阶段")
             platform_cfg = PLATFORM_CONFIG.get(task.platform, PLATFORM_CONFIG["douyin"])
             video_url = await self._generate_video(task, image_urls, platform_cfg, style)
             if video_url:
@@ -1002,7 +1011,7 @@ class PipelineEngine:
                             results[idx] = {"index": idx, "text": text,
                                             "engine": eff_engine,
                                             "duration": round(dur, 2), "path": str(local)}
-                            logger.info(f"TTS 镜 {idx + 1}/{len(segs)} 完成 ({dur:.1f}s)")
+                            logger.info(f"task{task.id} TTS 镜 {idx + 1}/{len(segs)} 完成 ({dur:.1f}s, {eff_engine})")
                             ok = True
                             break
                         else:
