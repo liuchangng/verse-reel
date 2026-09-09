@@ -497,6 +497,7 @@ class QueueService:
                     await pipeline_engine.run_stage(session, task_id, stage)
                     job.status = "done"
                     job.finished_at = datetime.now(timezone.utc)
+                    self._log_attempt(job, ok=True)
                     if stage == "video":
                         # 记录提交时间戳：下一个 video Job 至少等待这个时刻 + min_interval
                         _mark_video_submitted()
@@ -505,6 +506,7 @@ class QueueService:
                 except Exception as e:
                     job.attempts += 1
                     job.last_error = str(e)[:800]
+                    self._log_attempt(job, ok=False, error=str(e)[:300])
                     # 未超重试次数 → 退回 pending 自动重试；否则标记 failed
                     if job.attempts < max(1, settings.max_retries):
                         job.status = "pending"
@@ -524,6 +526,26 @@ class QueueService:
                 await self._maybe_finalize(session, task_id)
         finally:
             sem.release()
+
+    @staticmethod
+    def _log_attempt(job: Job, ok: bool, error: str = "") -> None:
+        """往 Job.attempts_log 追加一条尝试记录（JSON 数组，供进度/日志视图）。
+
+        存储格式：[{attempt, at, ok, error}]；任务列表弹窗按此渲染
+        "第 N 次尝试 失败/成功 + 原因"。max_retries=3 → 最多 4 条（3 失败 + 1 成功）。
+        """
+        import json as _json
+        try:
+            log = _json.loads(job.attempts_log) if job.attempts_log else []
+        except (ValueError, TypeError):
+            log = []
+        log.append({
+            "attempt": (job.attempts or 0) + (1 if ok else 0),
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ok": ok,
+            "error": None if ok else (error or "未知错误"),
+        })
+        job.attempts_log = _json.dumps(log, ensure_ascii=False)
 
     async def _await_video_slot(self, task_id: int, job_id: int):
         """距上次 video 提交未到 min_interval 秒则阻塞等待（主动节流）。"""

@@ -13,6 +13,8 @@ from sqlalchemy import select, func
 
 from app.database import get_db, async_session_factory
 from app.models.task import Task
+from app.models.job import Job
+from app.services.queue import STAGE_ORDER
 from app.models.poem import Poem
 from app.services.pipeline import pipeline_engine
 from app.services.publisher import publisher_service
@@ -305,6 +307,41 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
         "updated_at": task.updated_at.isoformat() if task.updated_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
     }
+
+
+@router.get("/{task_id}/jobs")
+async def get_task_jobs(task_id: int, db: AsyncSession = Depends(get_db)):
+    """任务各阶段执行记录（任务列表"进度/日志"弹窗数据源）。
+
+    返回按标准阶段顺序排列的 Job 列表：状态 / 尝试次数 / 每次尝试历史
+    （attempts_log，max_retries=3 → 最多 3 条失败 + 1 条成功）/ 起止时间 / 错误。
+    """
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    res = await db.execute(select(Job).where(Job.task_id == task_id))
+    jobs = {j.stage: j for j in res.scalars().all()}
+
+    out = []
+    for stage in STAGE_ORDER:
+        j = jobs.get(stage)
+        if j is None:
+            continue
+        try:
+            attempts_log = json.loads(j.attempts_log) if j.attempts_log else []
+        except (json.JSONDecodeError, TypeError):
+            attempts_log = []
+        out.append({
+            "stage": j.stage,
+            "status": j.status,
+            "attempts": j.attempts or 0,
+            "attempts_log": attempts_log,
+            "last_error": j.last_error,
+            "started_at": j.started_at.isoformat() if j.started_at else None,
+            "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+        })
+    return {"task_id": task_id, "task_status": task.status, "jobs": out}
 
 
 @router.post("/{task_id}/start")

@@ -37,6 +37,9 @@ class Job(Base):
     payload = Column(Text, nullable=True, comment="阶段额外参数(JSON)")
     # 重试次数
     attempts = Column(Integer, default=0, comment="已尝试次数")
+    # 每次尝试的历史（JSON 数组：[{attempt, at, ok, error}]，供任务列表"进度/日志"展示；
+    # max_retries=3 时最多 3 条失败记录 + 1 条成功记录）
+    attempts_log = Column(Text, nullable=True, comment="尝试历史(JSON)")
     # 最近一次错误
     last_error = Column(Text, nullable=True, comment="最近错误")
     created_at = Column(DateTime(timezone=True), server_default=func.now())

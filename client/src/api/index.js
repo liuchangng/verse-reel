@@ -95,6 +95,12 @@ export const getTask = async (id) => {
   return response
 }
 
+// 任务各阶段执行记录（任务列表"进度/日志"弹窗）
+export const getTaskJobs = async (id) => {
+  const response = await apiClient.get(`/tasks/${id}/jobs`)
+  return response
+}
+
 export const createTask = async (poemId, platforms = ['douyin']) => {
   // platforms: 数组，例 ['douyin','xiaohongshu','kuaishou','bilibili']
   // 后端 Query(list[str]) 接收；为空数组时回退全局 settings.output_platforms
@@ -232,13 +238,6 @@ export const updateSettings = async (data) => {
   return response
 }
 
-export const testConcurrency = async (type, concurrency) => {
-  const response = await apiClient.get('/settings/test-concurrency', {
-    params: { type, concurrency }
-  })
-  return response
-}
-
 // 导出默认对象
 export default {
   getHotspots,
@@ -256,5 +255,5 @@ export default {
   createProgressWebSocket,
   getSettings,
   updateSettings,
-  testConcurrency,
+  getTaskJobs,
 }
