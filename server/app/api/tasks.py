@@ -324,34 +324,64 @@ async def get_task_jobs(task_id: int, db: AsyncSession = Depends(get_db)):
     res = await db.execute(
         select(Job).where(Job.task_id == task_id).order_by(Job.id.asc())
     )
-    # 同一阶段可能有多条 Job（重新生成保留终态旧 Job 作历史）：按阶段聚合，
-    # 尝试日志按 Job.id 顺序拼接（追加语义），状态/错误/起止取最新一条。
+    all_jobs = res.scalars().all()  # id 升序 = 时间正序；只取一次，后面复用
+    # 同一阶段可能有多条 Job（重新生成保留终态旧 Job 作历史）：按阶段聚合。
+    # 尝试日志按 Job.id 顺序拼接并连续编号（跨轮不重号），**输出最新在前**
+    # （2026-09-09 用户定夺：日志最新的在前面，旧的在后面）；阶段卡片按
+    # 最近活动时间倒序——刚跑完/正在跑的阶段排最上面；状态/错误/起止取最新。
     by_stage: dict[str, list[Job]] = {}
-    for j in res.scalars().all():
+    for j in all_jobs:
         by_stage.setdefault(j.stage, []).append(j)
 
+    def _latest_ts(group: list[Job]):
+        j = group[-1]
+        return j.finished_at or j.started_at or j.created_at
+
     out = []
-    for stage in STAGE_ORDER:
-        group = by_stage.get(stage)
-        if not group:
-            continue
+    for stage, group in by_stage.items():
         latest = group[-1]
-        attempts_log = []
-        for j in group:
+        merged = []
+        seq = 0
+        for j in group:  # id 升序 = 时间正序，编号连续累加
             try:
-                attempts_log.extend(json.loads(j.attempts_log) if j.attempts_log else [])
+                logs = json.loads(j.attempts_log) if j.attempts_log else []
             except (json.JSONDecodeError, TypeError):
-                pass
+                logs = []
+            for a in logs:
+                seq += 1
+                a["attempt"] = seq
+                merged.append(a)
+        merged.reverse()  # 最新的在前面
         out.append({
             "stage": stage,
             "status": latest.status,
-            "attempts": sum((j.attempts or 0) for j in group),
-            "attempts_log": attempts_log,
+            "attempts": seq,
+            "attempts_log": merged,
             "last_error": latest.last_error,
             "started_at": latest.started_at.isoformat() if latest.started_at else None,
             "finished_at": latest.finished_at.isoformat() if latest.finished_at else None,
+            "_ts": _latest_ts(group),
         })
-    return {"task_id": task_id, "task_status": task.status, "jobs": out}
+    from datetime import datetime as _dt
+    out.sort(key=lambda x: x.pop("_ts") or _dt.min, reverse=True)
+
+    # 扁平执行日志（2026-09-09 用户定夺形态）：编号/阶段/状态/时间一张表，
+    # 全任务跨阶段跨轮次全局连续编号，按时间倒序输出（最新在最上面）。
+    flat = []
+    seq = 0
+    for j in all_jobs:
+        try:
+            logs = json.loads(j.attempts_log) if j.attempts_log else []
+        except (json.JSONDecodeError, TypeError):
+            logs = []
+        for a in logs:
+            seq += 1
+            a["seq"] = seq
+            a["stage"] = j.stage
+            flat.append(a)
+    flat.reverse()
+
+    return {"task_id": task_id, "task_status": task.status, "jobs": out, "logs": flat}
 
 
 @router.post("/{task_id}/start")

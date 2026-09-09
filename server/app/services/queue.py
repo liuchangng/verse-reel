@@ -633,12 +633,25 @@ class QueueService:
             # 退出 while 由再次进入临界区判断
 
     async def _maybe_finalize(self, session: AsyncSession, task_id: int):
-        """若任务所有阶段均 done → 置 pending_review；若有 failed → 置 failed。"""
-        res = await session.execute(select(Job).where(Job.task_id == task_id))
+        """若任务所有阶段均 done → 置 pending_review；若有 failed → 置 failed。
+
+        终态判定只看「每阶段最新一条 Job」（按 id 升序，后者覆盖）。2026-09-09
+        任务001事故：重新生成保留历史 Job 后，旧一轮的 subtitle 级联失败记录
+        把 image/video 刚跑完的任务拖成 failed。同理，存在 pending/running
+        Job 时任务仍在推进，不做终态判定（否则刚失败完又重试的场景被误判）。
+        """
+        res = await session.execute(
+            select(Job).where(Job.task_id == task_id).order_by(Job.id.asc())
+        )
         jobs = res.scalars().all()
         if not jobs:
             return
-        states = {j.stage: j.status for j in jobs}
+        if any(j.status in ("pending", "running") for j in jobs):
+            return  # 仍在推进（或新一轮重试在途），不是终态
+        latest: dict[str, str] = {}
+        for j in jobs:
+            latest[j.stage] = j.status  # id 升序遍历 → 每阶段留最新状态
+        states = latest
         task = await session.get(Task, task_id)
         if not task:
             return

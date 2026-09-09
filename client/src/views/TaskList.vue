@@ -121,36 +121,42 @@
       <p class="empty-hint">去 <a href="/poetry" class="link">诗词库</a> 选一首诗创建第一个任务吧</p>
     </div>
 
-    <!-- 进度/日志弹窗（各阶段执行与重试记录） -->
+    <!-- 执行记录弹窗：扁平日志表（编号/阶段/状态/时间，按时间倒序，分页） -->
     <div class="modal-overlay" v-if="progressTask" @click.self="progressTask = null">
       <div class="modal-content modal-content--wide">
         <div class="modal-header">
-          <h3>执行进度 · #{{ progressTask.id }} {{ progressTask.poem_title }}</h3>
+          <h3>执行记录 · #{{ progressTask.id }} {{ progressTask.poem_title }}</h3>
           <button class="modal-close" @click="progressTask = null">×</button>
         </div>
         <div class="modal-body">
           <div v-if="progressLoading" class="empty-text">加载中...</div>
-          <div v-else-if="progressJobs.length === 0" class="empty-text">该任务暂无执行记录</div>
-          <div v-else class="job-list">
-            <div v-for="job in progressJobs" :key="job.stage" class="job-item">
-              <div class="job-head">
-                <span class="job-stage">{{ stageNames[job.stage] || job.stage }}</span>
-                <span :class="['status-badge', jobStatusClass(job.status)]">{{ jobStatusLabel(job.status) }}</span>
-                <span class="job-attempts" v-if="job.attempts > 0">已尝试 {{ job.attempts }} 次</span>
-              </div>
-              <!-- 每次尝试的历史记录（max_retries=3 → 最多 3 条失败 + 1 条成功） -->
-              <div v-for="(a, i) in job.attempts_log" :key="i"
-                   :class="['attempt-line', a.ok ? 'attempt-ok' : 'attempt-fail']">
-                第 {{ i + 1 }} 次尝试 {{ a.ok ? '✅ 成功' : '❌ 失败' }}
-                <span class="attempt-time">{{ formatTime(a.at) }}</span>
-                <div v-if="a.error" class="attempt-error">{{ a.error }}</div>
-              </div>
-              <div v-if="job.last_error && job.status === 'failed' && !job.attempts_log?.length"
-                   class="attempt-line attempt-fail">
-                ❌ {{ job.last_error }}
-              </div>
+          <div v-else-if="progressLogs.length === 0" class="empty-text">该任务暂无执行记录</div>
+          <template v-else>
+            <table class="log-table">
+              <thead>
+                <tr><th class="col-seq">编号</th><th>阶段</th><th>状态</th><th>时间</th></tr>
+              </thead>
+              <tbody>
+                <template v-for="a in pagedLogs" :key="a.seq">
+                  <tr :class="a.ok ? 'log-row-ok' : 'log-row-fail'">
+                    <td class="col-seq">{{ a.seq }}</td>
+                    <td>{{ stageNames[a.stage] || a.stage }}</td>
+                    <td>{{ a.ok ? '✅ 成功' : '❌ 失败' }}</td>
+                    <td class="col-time">{{ formatTime(a.at) }}</td>
+                  </tr>
+                  <tr v-if="a.error" class="log-error-row">
+                    <td></td>
+                    <td colspan="3" class="log-error">{{ a.error }}</td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <div class="pagination" v-if="logTotalPages > 1">
+              <button class="page-btn" :disabled="logPage <= 1" @click="logPage--">上一页</button>
+              <span class="page-info">第 {{ logPage }} / {{ logTotalPages }} 页 · 共 {{ progressLogs.length }} 条</span>
+              <button class="page-btn" :disabled="logPage >= logTotalPages" @click="logPage++">下一页</button>
             </div>
-          </div>
+          </template>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" @click="progressTask = null">关闭</button>
@@ -275,22 +281,26 @@ import { formatDateTime as formatTime } from '../utils/time'
 // 查看详情
 const viewDetail = (task) => router.push(`/tasks/${task.id}`)
 
-// ---- 进度/日志弹窗（各阶段执行与重试记录）----
+// ---- 执行记录弹窗（扁平日志表：编号/阶段/状态/时间，最新在前，分页）----
 const stageNames = { script: '文案', character: '定妆照', image: '分镜图', video: '视频片段', tts: '配音', subtitle: '字幕/合成' }
-const progressTask = ref(null)     // 当前查看进度的任务（null = 关闭）
-const progressJobs = ref([])
+const progressTask = ref(null)     // 当前查看记录的任务（null = 关闭）
+const progressLogs = ref([])       // 后端已按时间倒序 + 全局连续编号
 const progressLoading = ref(false)
-
-const jobStatusClass = (s) => ({ running: 'badge-running', done: 'badge-done', failed: 'badge-error' }[s] || 'badge-review')
-const jobStatusLabel = (s) => ({ pending: '排队中', running: '执行中', done: '完成', failed: '失败' }[s] || s)
+const logPage = ref(1)
+const LOG_PAGE_SIZE = 15
+const logTotalPages = computed(() => Math.max(1, Math.ceil(progressLogs.value.length / LOG_PAGE_SIZE)))
+const pagedLogs = computed(() =>
+  progressLogs.value.slice((logPage.value - 1) * LOG_PAGE_SIZE, logPage.value * LOG_PAGE_SIZE)
+)
 
 const showProgress = async (task) => {
   progressTask.value = task
   progressLoading.value = true
-  progressJobs.value = []
+  progressLogs.value = []
+  logPage.value = 1
   try {
     const data = await api.getTaskJobs(task.id)
-    progressJobs.value = data.jobs || []
+    progressLogs.value = data.logs || []
   } catch (e) {
     Message.error('获取执行记录失败：' + (e.message || e))
     progressTask.value = null
@@ -437,19 +447,18 @@ onMounted(() => fetchTasks())
 .modal-tip--danger { background: #fff1f0; color: #5c1a1a; border-left-color: #cf1322; }
 .modal-footer { display: flex; justify-content: flex-end; gap: var(--spacing-2); padding: var(--spacing-4) var(--spacing-5); border-top: 1px solid var(--color-border-light); }
 
-/* 进度/日志弹窗 */
-.modal-content--wide { width: 560px; max-height: 80vh; display: flex; flex-direction: column; }
+/* 执行记录弹窗：扁平日志表 */
+.modal-content--wide { width: 640px; max-height: 80vh; display: flex; flex-direction: column; }
 .modal-content--wide .modal-body { overflow-y: auto; }
-.job-list { display: flex; flex-direction: column; gap: var(--spacing-3); }
-.job-item { background: var(--color-bg); border-radius: var(--radius-md); padding: var(--spacing-3); }
-.job-head { display: flex; align-items: center; gap: var(--spacing-2); margin-bottom: var(--spacing-2); }
-.job-stage { font-weight: 600; color: var(--color-text); }
-.job-attempts { font-size: 12px; color: var(--color-text-muted); margin-left: auto; font-variant-numeric: tabular-nums; }
-.attempt-line { font-size: 12.5px; padding: 4px 8px; border-radius: var(--radius-sm); margin-top: 4px; line-height: 1.5; }
-.attempt-ok { background: #f6ffed; color: #389e0d; }
-.attempt-fail { background: #fff2f0; color: #a8071a; }
-.attempt-time { color: var(--color-text-muted); margin-left: 6px; font-variant-numeric: tabular-nums; }
-.attempt-error { margin-top: 2px; word-break: break-all; opacity: 0.85; }
+.log-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.log-table th { text-align: left; padding: 6px 8px; color: var(--color-text-muted); font-weight: 500; border-bottom: 1px solid var(--color-border); position: sticky; top: 0; background: var(--color-bg-card); }
+.log-table td { padding: 6px 8px; border-bottom: 1px solid var(--color-border); vertical-align: top; }
+.log-table tr:last-child td { border-bottom: none; }
+.col-seq { width: 52px; font-variant-numeric: tabular-nums; color: var(--color-text-muted); }
+.log-row-ok td { color: #389e0d; }
+.log-row-fail td { color: #a8071a; }
+.log-error-row td { padding-top: 0; }
+.log-error { font-size: 12px; color: var(--color-text-secondary); word-break: break-all; opacity: 0.85; }
 
 /* 空状态 */
 .empty-state { text-align: center; padding: 80px 20px; background: var(--color-bg-card); border-radius: var(--radius-lg); border: 1px dashed var(--color-border); }

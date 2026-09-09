@@ -131,7 +131,7 @@ async def test_enqueue_preserves_terminal_jobs_as_history(env):
 
 @pytest.mark.asyncio()
 async def test_get_task_jobs_merges_history_per_stage(env):
-    """同阶段多 Job（历史 failed + 新 pending）聚合为一条，尝试日志顺序拼接。"""
+    """同阶段多 Job（历史 failed + 新 done）聚合为一条：日志最新在前、编号连续。"""
     await _mk_task(env, 1)
     old_fail = json.dumps([
         {"attempt": 1, "ok": False, "at": "2026-09-09T21:31:54", "error": "缺分镜图"},
@@ -143,14 +143,57 @@ async def test_get_task_jobs_merges_history_per_stage(env):
     await _mk_job(env, 1, "script", status="done", attempts=1,
                   attempts_log=json.dumps([{"attempt": 1, "ok": True}]))
 
-    # 端点用 Depends 注入 session——直接传测试 factory 的连接
     async with env() as db:
         data = await get_task_jobs(1, db)
 
-    stages = {j["stage"]: j for j in data["jobs"]}
-    assert set(stages) == {"script", "video"}
-    video = stages["video"]
+    # video 最近活动更晚 → 阶段卡片按最近活动倒序，video 排最前
+    assert [j["stage"] for j in data["jobs"]] == ["video", "script"], \
+        "阶段卡片按最近活动时间倒序（最新的在最上面）"
+    video = data["jobs"][0]
     assert video["status"] == "done", "状态取最新一条 Job"
-    assert video["attempts"] == 3, "尝试次数 = 历史 + 当前求和"
-    assert [a["ok"] for a in video["attempts_log"]] == [False, False, True], \
-        "尝试日志按 Job.id 顺序拼接（追加语义）"
+    assert video["attempts"] == 3, "尝试次数跨轮连续累计"
+    assert [a["attempt"] for a in video["attempts_log"]] == [3, 2, 1], \
+        "编号跨轮连续，日志最新在前"
+
+    # 扁平执行日志：全局连续编号（跨阶段跨轮），最新在最上面
+    logs = data["logs"]
+    assert [(a["seq"], a["stage"], a["ok"]) for a in logs] == [
+        (4, "script", True), (3, "video", True),
+        (2, "video", False), (1, "video", False),
+    ], "logs 按时间倒序、全局连续编号、带阶段字段"
+
+
+# ---------------------------------------------------------------- #
+# 4. 任务终态判定：只看每阶段最新 Job，活动 Job 在途不判定
+# ---------------------------------------------------------------- #
+
+@pytest.mark.asyncio()
+async def test_finalize_skipped_while_jobs_active(env):
+    """有 pending Job（重试在途）时不得判终态——旧代码会被历史 failed 拖成 failed。"""
+    svc = QueueService()
+    await _mk_task(env, 1, status="processing")
+    await _mk_job(env, 1, "video", status="failed", attempts=3)   # 旧历史
+    await _mk_job(env, 1, "video", status="done")                 # 新一轮成功
+    await _mk_job(env, 1, "subtitle", status="pending")           # 新一轮在途
+
+    async with env() as s:
+        await svc._maybe_finalize(s, 1)
+        t = await s.get(Task, 1)
+    assert t.status == "processing", "存在在途 Job 时不得做终态判定"
+
+
+@pytest.mark.asyncio()
+async def test_finalize_latest_stage_status_wins(env):
+    """全部收工后按每阶段最新状态判定：旧失败历史不得拖垮已完成的新一轮。"""
+    svc = QueueService()
+    await _mk_task(env, 1, status="processing")
+    await _mk_job(env, 1, "video", status="failed", attempts=3)     # 旧历史
+    await _mk_job(env, 1, "subtitle", status="failed", attempts=0)  # 旧历史（级联）
+    await _mk_job(env, 1, "image", status="done")
+    await _mk_job(env, 1, "video", status="done")
+    await _mk_job(env, 1, "subtitle", status="done")
+
+    async with env() as s:
+        await svc._maybe_finalize(s, 1)
+        t = await s.get(Task, 1)
+    assert t.status == "pending_review", "每阶段最新状态全部 done → 待审核"
