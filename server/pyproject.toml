@@ -40,7 +40,7 @@ cosyvoice = [
     "torch==2.11.0+cu128",
     "torchaudio==2.11.0+cu128",
     "numpy>=2.0",
-    "transformers>=4.51.3",
+    "transformers==4.51.3",
     "modelscope>=1.20.0",
     "onnxruntime>=1.29.0",
     "protobuf>=4.25.8",
@@ -56,7 +56,6 @@ cosyvoice = [
     "soundfile>=0.14.0",
     "pyarrow>=25.0.1",
     "pyworld>=0.3.5",
-    "diffusers>=0.40.0",
     "huggingface-hub",
     "lightning>=2.6.5",
     "gdown>=5.2.0",
@@ -74,6 +73,10 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv]
+# server 是应用目录而非可分发 Python 包：不构建项目本身，只安装依赖
+# （editable 构建会因 flat-layout 发现 app/data/assets/pretrained_models 多个顶层而失败）
+package = false
+
 # torch / torchaudio 的 +cu128 CUDA build 不在 PyPI，走 PyTorch 官方 index
 [[tool.uv.index]]
 name = "pytorch-cu128"
