@@ -286,6 +286,28 @@ class QueueService:
             else:
                 logger.info("队列恢复：无孤儿 Job")
 
+        # 孤儿任务自愈（2026-09-09）：旧版 create_task 用 run_pipeline 后台直跑、
+        # 不产生任何 Job，后端重启后这些 processing 任务无人推进也无从恢复。
+        # 补建全套阶段 Job——run_stage 对已完成阶段按产物自检（_have）跳过，幂等。
+        async with async_session_factory() as session:
+            res = await session.execute(select(Task.id).where(Task.status == "processing"))
+            processing_ids = [r[0] for r in res.all()]
+        heal_ids = []
+        for tid in processing_ids:
+            async with async_session_factory() as session:
+                has_job = (await session.execute(
+                    select(Job.id).where(Job.task_id == tid).limit(1)
+                )).scalar()
+            if has_job is None:
+                heal_ids.append(tid)
+        if heal_ids:
+            logger.warning(
+                f"队列恢复：{len(heal_ids)} 个 processing 任务无任何 Job"
+                f"（旧直跑路径遗留），补建全套阶段: {heal_ids}"
+            )
+            for tid in heal_ids:
+                await self.enqueue_task(task_id=tid)
+
     # ------------------------------------------------------------------ #
     # 生命周期
     # ------------------------------------------------------------------ #

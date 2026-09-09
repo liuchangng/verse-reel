@@ -174,3 +174,30 @@ async def test_orphan_pending_jobs_cleaned_not_starving(queue_env):
 
     # 第二轮：孤儿已清，task1 的 video 正常被认领（不被饿死）
     assert await svc._claim_and_dispatch() == 1, "清理孤儿后，其他任务必须能正常推进"
+
+
+@pytest.mark.asyncio()
+async def test_recover_enqueues_jobless_processing_tasks(queue_env):
+    """启动自愈（2026-09-09）：旧直跑路径遗留的 processing 任务没有任何 Job，
+    重启后 recover() 应补建全套阶段 Job（run_stage 按产物自检跳过已完成阶段）。"""
+    svc, factory = queue_env
+    async with factory() as s:
+        s.add(Task(id=9, poem_id=1, platform="douyin", status="processing"))
+        await s.commit()
+
+    await svc.recover()
+
+    async with factory() as s:
+        jobs = (await s.execute(
+            qmod.select(Job).where(Job.task_id == 9)
+        )).scalars().all()
+    assert {j.stage for j in jobs} == set(qmod.STAGE_ORDER), "应补建全部 6 个阶段"
+    assert all(j.status == "pending" for j in jobs)
+
+    # 幂等：再次 recover 不重复补建
+    await svc.recover()
+    async with factory() as s:
+        jobs2 = (await s.execute(
+            qmod.select(Job).where(Job.task_id == 9)
+        )).scalars().all()
+    assert len(jobs2) == len(qmod.STAGE_ORDER)

@@ -14,7 +14,7 @@ from sqlalchemy import select, func
 from app.database import get_db, async_session_factory
 from app.models.task import Task
 from app.models.job import Job
-from app.services.queue import STAGE_ORDER
+from app.services.queue import STAGE_ORDER, queue_service
 from app.models.poem import Poem
 from app.services.pipeline import pipeline_engine
 from app.services.publisher import publisher_service
@@ -123,9 +123,8 @@ async def create_task(
     poem_id: int,
     platform: str = Query("douyin", description="主平台(用于主视频分辨率/主URL)"),
     platforms: list[str] = Query(None, description="本任务选中的发布平台列表(多选)；为空则回退全局 settings.output_platforms"),
-    source_hotspot_title: str = Query(None, max_length=200, description="来源热点标题(热点页创建时传入；诗词库创建为空)"),
-    source_keywords: list[str] = Query(None, description="来源热点关键词(热点页创建时传入；空=非热点任务，文案不注入热词)"),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
+    source_hotspot_title: Optional[str] = None,
+    source_keywords: Optional[list[str]] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """创建新任务并自动启动流水线"""
@@ -146,22 +145,18 @@ async def create_task(
         source_hotspot_title=source_hotspot_title,
         source_keywords=source_keywords,
     )
-    
-    # 自动在后台启动流水线
-    async def run_in_background():
-        async with async_session_factory() as session:
-            try:
-                await pipeline_engine.run_pipeline(session, task.id)
-                logger.info(f"后台任务完成: 任务 {task.id}")
-            except Exception as e:
-                logger.error(f"后台任务失败: {task.id} - {e}")
-    
-    background_tasks.add_task(run_in_background)
-    
+
+    # 统一生命周期（2026-09-09）：创建即入队。旧版这里用 BackgroundTasks 直跑
+    # run_pipeline，完全绕过队列——无执行记录（进度弹窗"暂无执行记录"）、
+    # 不受任务间串行约束、后端重启即死且无从恢复（僵尸 processing）。
+    # 与 regenerate/batch 同一架构：全部走 generation_jobs 队列。
+    count = await queue_service.enqueue_task(task_id=task.id)
+
     return {
         "id": task.id,
-        "status": "processing",
-        "message": "任务创建成功，流水线已启动",
+        "status": "pending",
+        "enqueued_count": count,
+        "message": "任务创建成功，已加入生成队列（可在任务详情查看各阶段执行记录）",
     }
 
 

@@ -104,6 +104,6 @@ class TestTasksAPI:
             assert response.status_code == 200
             data = response.json()
             assert 'id' in data
-            # create_task 会立即后台启动流水线，故返回 'processing'
-            # （mock 后后台执行为 no-op，不影响创建响应契约）
-            assert data['status'] == 'processing'
+            # 2026-09-09 统一生命周期：创建即入队（generation_jobs 全套阶段），
+            # 任务状态保持 'pending' 由队列推进；进度可在任务详情看各阶段执行记录
+            assert data['status'] == 'pending'
