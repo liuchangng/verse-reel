@@ -513,7 +513,21 @@ class QueueService:
             return False
         # 产物表：阶段名 -> bool(是否已生成该阶段产物)
         produced = _task_produced(task)
-        return all(produced.get(p, False) for p in prereqs)
+        if not all(produced.get(p, False) for p in prereqs):
+            return False
+        # 在途阻断（2026-09-09 事故）：产物可能在阶段中途落库（script 文本在
+        # _generate_script 内先提交，分镜随后才生成），产物存在 ≠ 生产者收工。
+        # 前置阶段仍有 pending/running Job 时不得放行，否则下游与前置并发——
+        # 真实事故：tts 在 script 生成分镜前抢跑，读到空 storyboard 三连失败，
+        # 并级联拖死 image/video/subtitle，全任务报废。
+        active = (await session.execute(
+            select(Job.stage).where(
+                Job.task_id == job.task_id,
+                Job.status.in_(("pending", "running")),
+                Job.stage.in_(prereqs),
+            )
+        )).scalars().all()
+        return not active
 
     # ------------------------------------------------------------------ #
     # 单 Job 执行

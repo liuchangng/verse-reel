@@ -201,3 +201,35 @@ async def test_recover_enqueues_jobless_processing_tasks(queue_env):
             qmod.select(Job).where(Job.task_id == 9)
         )).scalars().all()
     assert len(jobs2) == len(qmod.STAGE_ORDER)
+
+
+# ---------------------------------------------------------------- #
+# 在途阻断（2026-09-09 事故）：产物中途落库 ≠ 生产者收工
+# ---------------------------------------------------------------- #
+
+@pytest.mark.asyncio()
+async def test_prereq_running_blocks_downstream_even_with_product(queue_env):
+    """前置 Job 仍在跑（哪怕产物已中途落库）时，下游 Job 不得被认领。
+
+    真实事故：_generate_script 中途先提交 task.script，tts 据此通过依赖
+    检查抢跑，读到空 storyboard 三连失败并级联拖死 image/video/subtitle。
+    """
+    svc, factory = queue_env
+    await _mk_task(factory, 1)
+    # script 产物已"存在"（模拟 _generate_script 的中途提交），但其 Job 在途
+    async with factory() as s:
+        t = await s.get(Task, 1)
+        t.script = "文案正文「金句」。"
+        await s.commit()
+    await _mk_job(factory, 1, "script", status="running")
+    await _mk_job(factory, 1, "tts")
+
+    assert await svc._claim_and_dispatch() == 0, "前置 Job 在途时，下游 Job 不得被认领"
+
+    # script Job 收工 → tts 立即可认领（不误伤正常推进）
+    async with factory() as s:
+        from sqlalchemy import select as _select
+        job = (await s.execute(_select(Job).where(Job.stage == "script"))).scalar_one()
+        job.status = "done"
+        await s.commit()
+    assert await svc._claim_and_dispatch() == 1, "前置收工后，下游 Job 必须放行"
