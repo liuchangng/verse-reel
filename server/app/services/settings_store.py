@@ -22,10 +22,15 @@ logger = logging.getLogger(__name__)
 WRITABLE_KEYS: tuple[str, ...] = (
     # 文本
     "text_api_key", "text_base_url", "text_model", "text_concurrency",
+    "text_rpm",
     # 图片
     "image_api_key", "image_base_url", "image_model", "image_concurrency",
+    "image_1k_rpm", "image_high_rpm",
     # 视频
     "video_api_key", "video_base_url", "video_model", "video_concurrency",
+    "video_rpm", "enable_agnes_video",
+    # 热点源
+    "newsnow_base_url",
     # 通用
     "critic_concurrency", "script_score_threshold",
     "image_score_threshold", "max_retries",

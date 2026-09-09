@@ -255,6 +255,13 @@ class Settings(BaseSettings):
     # 或对单个任务手动 regenerate stage=video 强制生成。
     enable_agnes_video: bool = Field(default=False)
 
+    # ====== 模型限流配置（RPM 滑动窗口；原硬编码移入设置随 overlay 热更）======
+    # 建议取官方限值 × 0.9 留 headroom；视频官方 1 次/分钟不打折。
+    text_rpm: int = Field(default=18)
+    image_1k_rpm: int = Field(default=18)
+    image_high_rpm: int = Field(default=8)   # 2K/3K 高分辨率档
+    video_rpm: int = Field(default=1)
+
     # ====== 通用配置 ======
     critic_concurrency: int = Field(default=5)
     script_score_threshold: float = Field(default=7.0)

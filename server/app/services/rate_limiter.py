@@ -22,6 +22,8 @@ import time
 from collections import deque
 from typing import Optional
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,23 +32,43 @@ class RateLimiter:
 
     Args:
         rpm: 每分钟最大请求数（已为官方限值的 90%，留有 headroom）。
+             也是 ``rpm_getter`` 缺省时的回退值。
         window_sec: 窗口大小（秒），默认 60。
         name: 用于日志的标签（"text" / "image-1K" / "video"）。
+        rpm_getter: 可选，实时读取当前 RPM 的回调——设置页改 RPM 后
+            不重启即生效（2026-09-09 问题 2-5：限流参数随配置热更）。
     """
 
-    def __init__(self, rpm: int, window_sec: float = 60.0, name: str = "?"):
-        if rpm < 1:
-            rpm = 1
-        self.rpm = rpm
+    def __init__(
+        self,
+        rpm: int,
+        window_sec: float = 60.0,
+        name: str = "?",
+        rpm_getter=None,
+    ):
+        self._initial_rpm = max(1, rpm)
+        self._rpm_getter = rpm_getter
         self.window_sec = window_sec
         self.name = name
-        # 每次请求进入的时间戳；队列长度为限制 rpm（最坏情况下都刚发）
-        self._hits: deque[float] = deque(maxlen=rpm)
+        # 每次请求进入的时间戳；容量由 _current_rpm() 动态判定，
+        # 超窗时间戳在 acquire 循环里滑出（不再用 maxlen 固定容量）。
+        self._hits: deque[float] = deque()
         self._lock = asyncio.Lock()
         # 统计
         self.wait_count = 0
         self.served = 0
         self.denied_429 = 0
+
+    def _current_rpm(self) -> int:
+        """实时 RPM：优先 rpm_getter（配置热更），异常/缺省回退初始值。"""
+        if self._rpm_getter is not None:
+            try:
+                v = int(self._rpm_getter())
+                if v >= 1:
+                    return v
+            except (TypeError, ValueError):
+                pass
+        return self._initial_rpm
 
     async def acquire(self, timeout: Optional[float] = None) -> bool:
         """等待直到窗口内放行一个新请求。
@@ -61,7 +83,9 @@ class RateLimiter:
                 # 把超过窗口的命中滑出
                 while self._hits and (now - self._hits[0]) >= self.window_sec:
                     self._hits.popleft()
-                if len(self._hits) < self.rpm:
+                # 每轮实时读配置（热更后新限值立即生效）
+                rpm = self._current_rpm()
+                if len(self._hits) < rpm:
                     # 放行：记录本次时间戳
                     self._hits.append(now)
                     self.served += 1
@@ -88,7 +112,7 @@ class RateLimiter:
     def snapshot(self) -> dict:
         return {
             "name": self.name,
-            "rpm_limit": self.rpm,
+            "rpm_limit": self._current_rpm(),
             "window_sec": self.window_sec,
             "used_in_window": len(self._hits),
             "served": self.served,
@@ -97,15 +121,27 @@ class RateLimiter:
         }
 
 
-# ---- 全局实例（按类型分配；90% 官方限值的初始值，可在运行时由配置调整） ----
+# ---- 全局实例（按类型分配；90% 官方限值的初始值，rpm_getter 实时读设置热更）----
 # 文本：官方 30 RP0，实际 20 → 18
-text_limiter = RateLimiter(rpm=18, name="text")
+text_limiter = RateLimiter(
+    rpm=18, name="text",
+    rpm_getter=lambda: getattr(settings, "text_rpm", 18),
+)
 # 图片 1K：官方 30，实际 20 → 18
-image_1k_limiter = RateLimiter(rpm=18, name="image-1K")
+image_1k_limiter = RateLimiter(
+    rpm=18, name="image-1K",
+    rpm_getter=lambda: getattr(settings, "image_1k_rpm", 18),
+)
 # 图片 2K/3K：更紧
-image_high_limiter = RateLimiter(rpm=8, name="image-2K+")
+image_high_limiter = RateLimiter(
+    rpm=8, name="image-2K+",
+    rpm_getter=lambda: getattr(settings, "image_high_rpm", 8),
+)
 # 视频：官方 2，实际 1 → 1（不打折，单数）
-video_limiter = RateLimiter(rpm=1, name="video")
+video_limiter = RateLimiter(
+    rpm=1, name="video",
+    rpm_getter=lambda: getattr(settings, "video_rpm", 1),
+)
 
 # ---- 接口层限频（安全加固 REQ-S3：防刷/防滥用，非外部 API 节流）----
 # 用法：await limiter.acquire(timeout=0) —— 满窗立即返回 False → 接口回 429（只拒不等待）

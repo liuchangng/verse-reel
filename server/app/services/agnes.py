@@ -103,7 +103,14 @@ class AgnesClient:
         max_tokens: int = 4000,
         temperature: float = 0.7,
     ) -> str:
-        """生成文本"""
+        """生成文本
+
+        退避重试（与 generate_image 同款，2026-09-09 问题 2-③）：
+        - HTTP 429/500/502/503/504：指数退避，给上游恢复窗口；
+        - httpx.TransportError（ConnectError/ReadTimeout 等连接层错误）：
+          外网抖动/代理瞬断时不再直接炸穿任务（旧版无任何重试，
+          连接失败直接抛 → 队列整阶段重试反复重抓热点）。
+        """
         model = model or self.text_model
 
         data = {
@@ -113,20 +120,40 @@ class AgnesClient:
             "temperature": temperature,
         }
 
-        # D4：主动节流（避免 RPM 撞限）。文本 18 RPM。
+        # D4：主动节流（避免 RPM 撞限）。RPM 随设置页热更。
         await text_limiter.acquire()
-        try:
-            result = await self._request(
-                "POST", "chat/completions",
-                api_key=self.text_api_key,
-                base_url=self.text_base_url,
-                json=data,
-            )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
-                text_limiter.record_429()
-            raise
-        return result["choices"][0]["message"]["content"]
+        last_err = None
+        for attempt in range(6):
+            try:
+                result = await self._request(
+                    "POST", "chat/completions",
+                    api_key=self.text_api_key,
+                    base_url=self.text_base_url,
+                    json=data,
+                )
+                return result["choices"][0]["message"]["content"]
+            except httpx.HTTPStatusError as e:
+                last_err = e
+                if e.response.status_code in (429, 500, 502, 503, 504):
+                    if e.response.status_code == 429:
+                        text_limiter.record_429()
+                    wait = min(2 ** attempt * 3, 20)
+                    logger.warning(
+                        f"文本生成 HTTP {e.response.status_code}，退避 {wait}s 重试 "
+                        f"({attempt + 1}/6): {str(e)[:120]}"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+            except httpx.TransportError as e:
+                last_err = e
+                wait = min(2 ** attempt * 3, 20)
+                logger.warning(
+                    f"文本生成连接异常 {type(e).__name__}，退避 {wait}s 重试 "
+                    f"({attempt + 1}/6): {str(e)[:120]}"
+                )
+                await asyncio.sleep(wait)
+        raise last_err or RuntimeError("文本生成失败")
     
     async def generate_image(
         self,
