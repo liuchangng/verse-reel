@@ -280,6 +280,7 @@ const route = useRoute()
 const router = useRouter()
 const taskId = ref(route.params.id)
 const task = ref({})
+const jobsByStage = ref({})   // stage -> job.status（步骤条真实执行状态）
 let pollTimer = null
 let wsConn = null  // WebSocket 连接实例
 
@@ -292,50 +293,48 @@ const stepDefs = [
   { key: 'done', label: '完成', num: 5 },
 ]
 
-// 计算每步状态：基于实际数据存在性判断（不再依赖 current_stage 截断）
+// 计算每步状态：以队列 Job 真实执行状态为准（2026-09-09 任务001事故——
+// 旧版按"产物是否存在"推断，部分重生成时出现"视频✓图片进行中"乱序）。
+// 无 Job 的存量任务回退产物推断。
 const steps = computed(() => {
   const t = task.value
-  const isFailed = t.status === 'failed'
-  const isDone = t.status === 'done'
-  const isProcessing = t.status === 'processing'
-  const isReview = t.status === 'pending_review'
+  if (t.status === 'done') return stepDefs.map(s => ({ ...s, state: 'done' }))
 
-  // 数据驱动的完成判断
+  // 单阶段状态：Job 状态优先，无 Job 回退产物推断
+  const JOB_STATE = { done: 'done', running: 'active', failed: 'error', pending: '' }
+  const stageState = (stage, productDone) => {
+    const st = jobsByStage.value[stage]
+    if (st) return JOB_STATE[st] ?? ''
+    return productDone ? 'done' : ''
+  }
+
+  // 产物兜底判断（存量任务无 Job 时用）
   const scriptDone = !!(t.script && t.script_score)
-  const imageDone = !!(t.image_urls && t.image_urls.length > 0) || !!(t.image_score != null && t.image_score > 0)
+  const charDone = !!t.character_ref
+  const imgDone = !!(t.image_urls && t.image_urls.length > 0)
+  const ttsDone = !!t.audio_url
   const videoDone = !!t.video_url
+  const subDone = !!t.subtitle_url
 
-  return stepDefs.map((s, i) => {
-    let state = ''
-    if (isDone) {
-      // 已完成：全绿
-      state = 'done'
-    } else if (isFailed) {
-      // 失败：按数据判断已完成/当前失败/后续空
-      if (s.key === 'script' && scriptDone) state = 'done'
-      else if (s.key === 'review' && scriptDone) state = 'done'
-      else if (s.key === 'image' && imageDone) state = 'done'
-      else if (s.key === 'video' && videoDone) state = 'done'
-      else if (!state) { /* 第一个未完成的标记 error */ }
-      // 找到第一个未完成的位置
-      const prevDone = stepDefs.slice(0, i).every((prev, pi) => {
-        if (prev.key === 'script') return scriptDone
-        if (prev.key === 'review') return scriptDone
-        if (prev.key === 'image') return imageDone
-        if (prev.key === 'video') return videoDone
-        return true
-      })
-      if (!prevDone && !state) state = 'error'
-    } else if (isProcessing || isReview) {
-      // 处理中 / 待审核：按流水线顺序 + 数据判断
-      if (s.key === 'script') state = scriptDone ? 'done' : 'active'
-      else if (s.key === 'review') state = scriptDone ? 'done' : (scriptDone ? '' : 'active')
-      else if (s.key === 'image') state = imageDone ? 'done' : (scriptDone ? 'active' : '')
-      else if (s.key === 'video') state = videoDone ? 'done' : (imageDone ? 'active' : '')
-      else if (s.key === 'done') state = videoDone ? 'done' : (isReview ? 'active' : '')
-    }
-    return { ...s, state }
-  })
+  // 多阶段聚合：任一 error → error；任一 active → active；全部 done → done
+  const agg = (pairs) => {
+    const sts = pairs.map(([stage, productDone]) => stageState(stage, productDone))
+    if (sts.includes('error')) return 'error'
+    if (sts.includes('active')) return 'active'
+    if (sts.length && sts.every(s => s === 'done')) return 'done'
+    return ''
+  }
+
+  const script = stageState('script', scriptDone)
+  // 文案审核：非队列阶段——文案完成后挂"待人工审核"即 active
+  const review = t.review_status === 'approved' ? 'done'
+    : (script === 'done' ? 'active' : '')
+  const image = agg([['character', charDone], ['image', imgDone]])
+  const video = agg([['tts', ttsDone], ['video', videoDone], ['subtitle', subDone]])
+  const doneStep = t.status === 'pending_review' ? 'active' : ''
+
+  const stateByKey = { script, review, image, video, done: doneStep }
+  return stepDefs.map(s => ({ ...s, state: stateByKey[s.key] || '' }))
 })
 
 // 辅助状态判断
@@ -483,6 +482,14 @@ const confirmPublish = async () => {
 // ====== 数据加载 ======
 const loadTask = async () => {
   try { Object.assign(task.value, await api.getTask(taskId.value)) } catch(e) {}
+  // 步骤条数据源：队列 Job 真实执行状态（2026-09-09 任务001事故——按产物推断
+  // 状态在部分重生成时会出现"视频✓图片进行中"的乱序假象）
+  try {
+    const jobs = await api.getTaskJobs(taskId.value)
+    const map = {}
+    for (const j of (jobs.items || jobs || [])) map[j.stage] = j.status
+    jobsByStage.value = map
+  } catch(e) {}
 }
 
 // WebSocket 实时推送（主导）
@@ -502,6 +509,12 @@ const connectWS = () => {
     if (data.image_urls) task.value.image_urls = data.image_urls
     if (data.video_url) task.value.video_url = data.video_url
     if (data.video_duration != null) task.value.video_duration = data.video_duration
+    // 阶段推进 → 刷新 Job 状态（步骤条数据源），失败不阻塞主流程
+    api.getTaskJobs(taskId.value).then(jobs => {
+      const map = {}
+      for (const j of (jobs.items || jobs || [])) map[j.stage] = j.status
+      jobsByStage.value = map
+    }).catch(() => {})
 
     // 终态时关闭 WS
     if (data.status === 'done' || data.status === 'failed' || data.status === 'pending_review') {
