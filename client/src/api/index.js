@@ -101,13 +101,21 @@ export const getTaskJobs = async (id) => {
   return response
 }
 
-export const createTask = async (poemId, platforms = ['douyin']) => {
+export const createTask = async (poemId, platforms = ['douyin'], source = null) => {
   // platforms: 数组，例 ['douyin','xiaohongshu','kuaishou','bilibili']
   // 后端 Query(list[str]) 接收；为空数组时回退全局 settings.output_platforms
   // 用 indices:false 序列化为 platforms=a&platforms=b（FastAPI 方能解析为列表）
+  // source: 热点来源 { title, keywords }（热点页创建时传入；诗词库/Top榜创建为 null
+  // → 任务不关联热点，文案阶段不注入热词）
   const params = { poem_id: poemId }
   if (Array.isArray(platforms) && platforms.length > 0) {
     params.platforms = platforms
+  }
+  if (source?.title) {
+    params.source_hotspot_title = source.title
+  }
+  if (Array.isArray(source?.keywords) && source.keywords.length > 0) {
+    params.source_keywords = source.keywords
   }
   const response = await apiClient.post('/tasks/', null, {
     params,

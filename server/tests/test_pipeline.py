@@ -37,8 +37,6 @@ class TestPipelinePendingReview:
         Session = async_sessionmaker(engine, expire_on_commit=False)
 
         # mock 阶段方法（避免调用真实 AI API）
-        async def fake_hotspot(*a, **k):
-            return {"themes": ["思乡"], "keywords": ["明月", "故乡"], "style": "人生感悟"}
         async def fake_script(*a, **k):
             from app.services.critic import ScoreResult
             return "床前明月光，疑是地上霜。", ScoreResult(score=8.0, passed=True, feedback="ok")
@@ -55,7 +53,6 @@ class TestPipelinePendingReview:
         async def fake_subtitle(*a, **k):
             return "http://video/1.mp4"
 
-        monkeypatch.setattr(pipeline_engine, "fetch_hotspots_and_match", fake_hotspot)
         monkeypatch.setattr(pipeline_engine, "_generate_script", fake_script)
         monkeypatch.setattr(pipeline_engine, "_generate_storyboard", fake_storyboard)
         monkeypatch.setattr("app.services.character.character_service.generate_character_reference", fake_chars)

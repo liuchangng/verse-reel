@@ -123,6 +123,8 @@ async def create_task(
     poem_id: int,
     platform: str = Query("douyin", description="主平台(用于主视频分辨率/主URL)"),
     platforms: list[str] = Query(None, description="本任务选中的发布平台列表(多选)；为空则回退全局 settings.output_platforms"),
+    source_hotspot_title: str = Query(None, max_length=200, description="来源热点标题(热点页创建时传入；诗词库创建为空)"),
+    source_keywords: list[str] = Query(None, description="来源热点关键词(热点页创建时传入；空=非热点任务，文案不注入热词)"),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: AsyncSession = Depends(get_db),
 ):
@@ -131,15 +133,19 @@ async def create_task(
     poem = await db.get(Poem, poem_id)
     if not poem:
         raise HTTPException(status_code=404, detail="诗词不存在")
-    
+
     # 主平台取列表首个(或默认 douyin)，列表本身透传给 create_task
     if platforms:
         platform = platforms[0]
     else:
         platforms = None
-    
-    # 创建任务
-    task = await pipeline_engine.create_task(db, poem_id, platform, platforms)
+
+    # 创建任务（热点来源随任务落库：文案阶段只注入本任务自己的热点）
+    task = await pipeline_engine.create_task(
+        db, poem_id, platform, platforms,
+        source_hotspot_title=source_hotspot_title,
+        source_keywords=source_keywords,
+    )
     
     # 自动在后台启动流水线
     async def run_in_background():

@@ -130,15 +130,19 @@ class PipelineEngine:
         poem_id: int,
         platform: str = "douyin",
         platforms: list[str] | None = None,
+        source_hotspot_title: str | None = None,
+        source_keywords: list[str] | None = None,
     ) -> Task:
         """
         创建新任务
-        
+
         Args:
             db: 数据库会话
             poem_id: 诗词 ID
             platform: 目标平台
-            
+            source_hotspot_title: 来源热点标题（热点页创建时传入；诗词库创建为空）
+            source_keywords: 来源热点关键词（同上；为空 = 非热点任务，文案不注入热词）
+
         Returns:
             创建的任务
         """
@@ -146,16 +150,31 @@ class PipelineEngine:
         poem = await db.get(Poem, poem_id)
         if not poem:
             raise ValueError(f"诗词不存在: {poem_id}")
-        
+
         # 创建任务
         # platforms: 本任务显式选中的发布平台（来自创建弹窗多选）；为空则留空，
         # 渲染阶段回退到全局 settings.output_platforms。
         _platforms = platforms or []
+        # 热点任务：创建时即按来源热点主题定风格（旧版在文案阶段实时抓全榜推断，
+        # 时过境迁后会漂移到与任务无关的热点上）。
+        derived_style = None
+        if source_hotspot_title:
+            try:
+                themes = hotspot_service.match_themes(
+                    {"source": [{"title": source_hotspot_title}]}
+                )
+                derived_style = self._select_style(themes)
+            except Exception as exc:  # 主题匹配失败不阻断创建
+                logger.warning("来源热点主题匹配失败(热点=%r): %s", source_hotspot_title, exc)
+                derived_style = None
         task = Task(
             poem_id=poem_id,
             status="pending",
             platform=platform,
             platforms=json.dumps(_platforms, ensure_ascii=False) if _platforms else None,
+            source_hotspot_title=source_hotspot_title,
+            source_keywords=json.dumps(source_keywords, ensure_ascii=False) if source_keywords else None,
+            style=derived_style,
         )
         db.add(task)
         await db.commit()
@@ -163,48 +182,6 @@ class PipelineEngine:
         
         logger.info(f"创建任务: {task.id} - {poem.title}")
         return task
-    
-    async def fetch_hotspots_and_match(
-        self,
-        task: Task,
-        platforms: list[str] | None = None,
-    ) -> dict:
-        """
-        抓取热点并匹配主题
-        
-        Returns:
-            {"hotspots": {...}, "themes": [...], "keywords": [...], "style": str}
-        """
-        try:
-            # 抓取热点
-            hotspots = await hotspot_service.fetch_hotspots(platforms)
-            
-            # 匹配主题
-            themes = hotspot_service.match_themes(hotspots)
-            
-            # 提取关键词
-            keywords = hotspot_service.get_trending_keywords(hotspots)
-            
-            # 根据主题选择风格
-            style = self._select_style(themes)
-            
-            logger.info(f"热点匹配: themes={themes}, style={style}, keywords={keywords[:3]}...")
-            
-            return {
-                "hotspots": hotspots,
-                "themes": themes,
-                "keywords": keywords,
-                "style": style,
-            }
-        except Exception as e:
-            logger.warning(f"热点抓取失败: {e}")
-            # 返回默认值
-            return {
-                "hotspots": {},
-                "themes": ["人生感悟"],
-                "keywords": [],
-                "style": "人生感悟",
-            }
     
     def _select_style(self, themes: list[str]) -> str:
         """根据主题选择风格"""
@@ -291,11 +268,18 @@ class PipelineEngine:
                 return
             if poem is None:
                 raise RuntimeError("script 缺少前置 poem")
-            hotspot = await self.fetch_hotspots_and_match(task)
-            h_style = hotspot.get("style") or style
-            keywords = hotspot.get("keywords") or []
-            script_text, score = await self._generate_script(db, task, poem, h_style, keywords)
-            task.style = h_style
+            # 热点来源修复（2026-09-09）：文案只注入"任务创建时持久化的来源热点"。
+            # 诗词库创建的任务 source_keywords 为空 → 不注入任何热词。
+            # 旧版此处实时重抓全平台热榜 Top3 注入，生成时刻的热门新闻（如
+            # "苹果折叠屏"）被硬揉进文案，把内容污染得乱七八糟。
+            keywords = task.source_keywords_list
+            if keywords:
+                logger.info(
+                    f"task{task_id} 注入来源热点: {task.source_hotspot_title!r}, "
+                    f"keywords={keywords[:3]}..."
+                )
+            script_text, score = await self._generate_script(db, task, poem, style, keywords)
+            task.style = style
             if not score.passed:
                 task.status = "failed"
                 task.error_message = f"文案评分未达标: {score.feedback}"
@@ -449,14 +433,11 @@ class PipelineEngine:
             task.progress = 10
             await db.commit()
             
-            # 阶段0: 抓取热点并匹配主题
-            task.current_stage = "hotspot"
-            task.progress = 5
-            await db.commit()
-            
-            hotspot_result = await self.fetch_hotspots_and_match(task)
-            style = hotspot_result["style"]
-            keywords = hotspot_result["keywords"]
+            # 阶段0: 热点来源（2026-09-09 修复）：不再实时抓全平台热榜。
+            # 文案关键词只来自任务创建时持久化的来源热点；无来源（诗词库创建/
+            # 存量任务）则不注入任何热词。风格同理，用创建时定好的 task.style。
+            style = task.style or "人生感悟"
+            keywords = task.source_keywords_list
             
             # 阶段1: 生成文案（使用风格化的提示词）
             script_text, script_score = await self._generate_script(

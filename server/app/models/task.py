@@ -1,4 +1,6 @@
 """任务数据模型"""
+import json
+
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
 from sqlalchemy.sql import func
 from app.database import Base
@@ -10,6 +12,12 @@ class Task(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     poem_id = Column(Integer, ForeignKey("poems.id"), nullable=False, comment="关联诗词ID")
+    # 热点来源（2026-09-09）：热点页创建任务时持久化"选诗依据的那个热点"。
+    # 文案阶段只允许注入本任务关联的热点；诗词库创建的任务两列为空 = 无热点、
+    # 不注入（旧版生成文案时实时重抓全平台热榜 Top3 注入，与任务无关的新闻词
+    # 把文案污染得乱七八糟）。
+    source_hotspot_title = Column(String(200), nullable=True, comment="来源热点标题(空=非热点任务)")
+    source_keywords = Column(Text, nullable=True, comment="来源热点关键词(JSON数组, 空=非热点任务)")
     # status: pending/processing/pending_review/done/failed
     status = Column(String(20), default="pending", comment="状态: pending/processing/pending_review/done/failed")
     current_stage = Column(String(20), comment="当前阶段: script/review/image/video/done")
@@ -40,6 +48,17 @@ class Task(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     completed_at = Column(DateTime(timezone=True), comment="完成时间")
-    
+
+    @property
+    def source_keywords_list(self) -> list:
+        """source_keywords（JSON 字符串）→ list；空值/坏数据统一返回 []。"""
+        if not self.source_keywords:
+            return []
+        try:
+            v = json.loads(self.source_keywords)
+            return v if isinstance(v, list) else []
+        except (ValueError, TypeError):
+            return []
+
     def __repr__(self):
         return f"<Task(id={self.id}, poem_id={self.poem_id}, status='{self.status}')>"

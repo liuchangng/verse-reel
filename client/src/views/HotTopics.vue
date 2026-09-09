@@ -68,7 +68,7 @@
             </div>
             <div class="poem-quote">"{{ poem.content_preview }}"</div>
             <div class="poem-reason">💡 {{ poem.match_reason }}</div>
-            <button class="btn btn-primary btn-sm" @click="createTask(poem)">
+            <button class="btn btn-primary btn-sm" @click="createTask(poem, item)">
               创建任务 →
             </button>
           </div>
@@ -157,6 +157,7 @@ const hasLoadedOnce = ref(_cache.hotspots.length > 0)
 // 弹窗状态
 const showCreateModal = ref(false)
 const selectedPoem = ref(null)
+const selectedSource = ref(null)
 
 // 自动刷新定时器
 let refreshTimer = null
@@ -221,9 +222,10 @@ const formatTime = (time) => {
   return d.toLocaleTimeString('zh-CN')
 }
 
-// 打开创建任务弹窗（直接传诗词对象）
-const createTask = (poem) => {
+// 打开创建任务弹窗（source: 来源热点 {title, keywords}；Top 榜/无热点来源传 null）
+const createTask = (poem, source = null) => {
   selectedPoem.value = poem
+  selectedSource.value = source
   showCreateModal.value = true
 }
 
@@ -233,7 +235,8 @@ const confirmCreateTask = async () => {
 
   try {
     // 不传 platforms，由后端回退 settings.output_platforms（默认全选）
-    const result = await api.createTask(selectedPoem.value.id, [])
+    // 热点来源随任务落库：文案阶段只注入本任务关联的热点（2026-09-09 修复）
+    const result = await api.createTask(selectedPoem.value.id, [], selectedSource.value)
     showCreateModal.value = false
 
     // 跳转到任务管理页
