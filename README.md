@@ -114,6 +114,8 @@ npm run dev                                  # http://localhost:5173
 
 停止：`stop.bat` 或 Ctrl+C。
 
+> **数据库**：后端用 SQLite（`server/data/poems.db`，9 张表），首次启动自动建表。数据库文件不入库；完整建表语句（DDL）见 [`docs/schema.sql`](docs/schema.sql)，需要手动初始化时可直接 `sqlite3 server/data/poems.db < docs/schema.sql`。
+
 ### 5. 导入古诗词数据
 
 ```bash
