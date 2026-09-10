@@ -13,7 +13,7 @@
       <div class="btn-group">
         <button class="btn btn-secondary" @click="$router.push('/tasks')">← 返回列表</button>
         <button v-if="task.status === 'done'" class="btn btn-secondary" @click="openPublish">📤 发布</button>
-        <button v-if="task.status === 'failed'" class="btn btn-primary" @click="regenerateTask">🔄 重新生成</button>
+        <button v-if="task.status === 'failed'" class="btn btn-primary" :disabled="regenSubmitting" @click="regenerateTask">🔄 重新生成</button>
         <button class="btn btn-ghost" :disabled="!task.video_url" @click="exportVideo">📥 导出视频</button>
       </div>
     </div>
@@ -25,7 +25,7 @@
         <div class="error-title">任务执行失败</div>
         <div class="error-msg">{{ task.error_message }}</div>
       </div>
-      <button class="btn btn-sm btn-primary" @click="regenerateTask">重新生成</button>
+      <button class="btn btn-sm btn-primary" :disabled="regenSubmitting" @click="regenerateTask">重新生成</button>
     </div>
 
     <!-- 审核操作区（仅 pending_review） -->
@@ -37,7 +37,7 @@
       <div class="review-actions">
         <button class="btn btn-success" @click="approveTask">✅ 通过并发布</button>
         <button class="btn btn-danger" @click="showRejectInput = !showRejectInput">✗ 驳回</button>
-        <button class="btn btn-secondary" @click="regenerateTask">🔄 重新生成</button>
+        <button class="btn btn-secondary" :disabled="regenSubmitting" @click="regenerateTask">🔄 重新生成</button>
       </div>
       <div class="reject-input" v-if="showRejectInput">
         <textarea v-model="rejectComment" placeholder="请输入驳回意见..." rows="3"></textarea>
@@ -87,7 +87,7 @@
         </div>
         <div class="status-cell">
           <span class="cell-label">当前阶段</span>
-          <span class="cell-value cell-stage">{{ getStageLabel(task.current_stage) }}</span>
+          <span class="cell-value cell-stage">{{ currentStageText }}</span>
         </div>
       </div>
     </div>
@@ -244,7 +244,7 @@
         <div class="proc-spin"></div>
         <div>
           <div class="proc-title">任务处理中</div>
-          <div class="proc-sub">{{ getStageLabel(task.current_stage) }}...</div>
+          <div class="proc-sub">{{ currentStageText }}...</div>
         </div>
       </div>
     </div>
@@ -349,6 +349,27 @@ const stageLabels = {
 }
 const getStageLabel = (s) => stageLabels[s] || s || '-'
 
+// 「当前阶段」显示值：优先取队列 Job 的真实执行阶段，其次才回退 task.current_stage。
+// 背景（2026-09-09 任务001事故）：current_stage 由 run_pipeline 整轮结束时写入，
+// 队列分阶段执行（run_stage）并不更新它 —— 于是任务产物已全部生成、只差一条
+// 收尾 Job 时，状态总览仍显示「当前阶段：字幕烧录」，与「已完成/待审核」自相矛盾。
+// 修复：processing 态下以 Job 表的 running → pending 为准；非 processing 态直接
+// 给出与任务状态一致的文案，不再回显已过期的子阶段名。
+const QUEUE_STAGE_ORDER = ['script', 'character', 'image', 'tts', 'video', 'subtitle']
+const currentStageText = computed(() => {
+  const t = task.value
+  if (t.status === 'done') return '已完成'
+  if (t.status === 'pending_review') return '全部完成（待审核）'
+  if (t.status === 'failed') return `${getStageLabel(t.current_stage)}失败`
+  // processing：取 Job 真实执行状态
+  const running = QUEUE_STAGE_ORDER.find(s => jobsByStage.value[s] === 'running')
+  if (running) return getStageLabel(running)
+  const pending = QUEUE_STAGE_ORDER.find(s => jobsByStage.value[s] === 'pending')
+  if (pending) return `${getStageLabel(pending)}（排队中）`
+  // 无 Job 的存量任务：回退 task.current_stage（可能是 storyboard/done 等子阶段）
+  return getStageLabel(t.current_stage)
+})
+
 const statusPillLabel = (s) => ({ processing: '进行中', pending_review: '待审核', done: '已完成', failed: '已失败' }[s] || s)
 const statusPillClass = (s) => ({ processing: 'pill-running', pending_review: 'pill-review', done: 'pill-done', failed: 'pill-error' }[s] || '')
 const subStatusLabel = (s) => ({ done: '已完成', processing: '进行中', pending: '未开始' }[s] || '-')
@@ -438,6 +459,7 @@ const rejectTask = async () => {
 // 再由 run_stage('image') 只跑图片阶段。故这里是「重生成整组分镜图」，
 // 不是单张 —— 文案与定妆照都不会被抹掉。
 const regenBusy = ref(-1)
+const regenSubmitting = ref(false)   // 防连点：一次点击只发一个请求
 const regenerateOneShot = async (idx) => {
   const total = (task.value?.image_urls || []).length
   if (!confirm(`重生成该任务的全部 ${total} 张分镜图？\n\n将保留文案、分镜脚本与角色定妆照，仅重跑图片阶段。`)) return
@@ -457,8 +479,26 @@ const regenerateTask = async () => {
   // 直接透传会 400「未知阶段」。白名单外的值一律回退到 all（重跑整条流水线）。
   const LEGAL_STAGES = ['script', 'character', 'image', 'tts', 'video', 'subtitle', 'all', 'storyboard', 'spot']
   const stage = LEGAL_STAGES.includes(task.value.current_stage) ? task.value.current_stage : 'all'
-  try { await api.regenerateTask(taskId.value, stage); await loadTask() }
-  catch(e) {}
+  if (regenSubmitting.value) return
+  regenSubmitting.value = true
+  try {
+    await api.regenerateTask(taskId.value, stage)
+    await loadTask()
+  } catch (e) {
+    // 409：任务仍有在途 Job，后端拒绝覆盖。把后端给的中文说明转给用户确认，
+    // 确认后带 force=true 重试（避免悄悄丢弃已跑完的分镜/配音/视频）。
+    const msg = (e && (e.response?.data?.detail || e.message)) || ''
+    if (e?.response?.status === 409) {
+      if (confirm(`${msg}\n\n仍要强制重新生成吗？`)) {
+        try { await api.regenerateTask(taskId.value, stage, true); await loadTask() }
+        catch (e2) { alert('强制重生成失败：' + (e2.response?.data?.detail || e2.message)) }
+      }
+    } else {
+      alert('重生成失败：' + msg)
+    }
+  } finally {
+    regenSubmitting.value = false
+  }
 }
 
 // 发布弹窗
@@ -589,6 +629,9 @@ onUnmounted(() => cleanup())
 /* 连接线：flex 自适应撑满两节点间距，颜色跟随当前步状态 */
 .step-connector { flex: 1; height: 2px; margin-top: 17px; background: #e8e8e8; min-width: 16px; transition: background .3s; }
 .step-connector.done { background: #52c41a; }
+/* 进行中的连线：旧版缺这条规则，active 步左侧的连线回落到灰色 #e8e8e8，
+   与前面已完成的绿色段之间像"断了一条线"。补蓝色后进度线连续可辨。 */
+.step-connector.active { background: linear-gradient(90deg, #52c41a 0%, #1890ff 100%); }
 .step-connector.error { background: #ff4d4f; }
 
 /* ====== 状态总览 ====== */

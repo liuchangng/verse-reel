@@ -143,9 +143,11 @@ export const reviewTask = async (id, action, comment) => {
 }
 
 // 重新生成（重跑指定 stage）
-export const regenerateTask = async (id, stage = 'script') => {
+// force=true：覆盖在途 Job。后端在任务仍有 pending/running 阶段时返回 409，
+// 需用户二次确认后带 force=true 重试（2026-09-09：防"莫名又重新生成"）。
+export const regenerateTask = async (id, stage = 'script', force = false) => {
   const response = await apiClient.post(`/tasks/${id}/regenerate`, null, {
-    params: { stage }
+    params: force ? { stage, force: true } : { stage }
   })
   return response
 }
