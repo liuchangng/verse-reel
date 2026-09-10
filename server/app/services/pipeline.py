@@ -966,6 +966,8 @@ class PipelineEngine:
         # 上限 2 路并发 + 重试 + 静音兜底，保证每镜都有片段、序号不偏移。
         sem = asyncio.Semaphore(min(int(settings.tts_concurrency), 2))
         results: dict[int, dict] = {}
+        # CosyVoice→edge-tts 音色降级警告收集（gen_one 内并发追加）
+        degrade_warns: list[str] = []
 
         # 自动适配音色：task 上 LLM/标题选出的 preset 优先；否则 config.default_voice_preset；
         # 都没有则 None（tts_core 走全局参考音频）。
@@ -995,6 +997,9 @@ class PipelineEngine:
                             # (cosyvoice→wav/edge-tts→mp3) 决定 DSP 强度（见 #20260903）。
                             eff_engine = (r.get("engine") or "edge-tts").lower()
                             use_dsp_here = eff_engine not in ("edge-tts", "edge")
+                            # CosyVoice 不可用降级 edge-tts 时上浮警告（音色非 preset 原声）
+                            if r.get("warning"):
+                                degrade_warns.append(str(r["warning"]))
                             path = r.get("audio_path")
                             if path and Path(path).exists():
                                 # 合并后 TTS 同进程，直接读本地产物，省去 HTTP 回环
@@ -1089,6 +1094,16 @@ class PipelineEngine:
         gate = self._tts_loudness_gate(task, ordered)
         if gate:
             return gate
+
+        # 音色降级警告（CosyVoice 不可用 → edge-tts）上浮到 task，
+        # 与静音兜底警告共用 error_message 排障痕迹通道。
+        if degrade_warns:
+            dw = (
+                f"TTS 音色降级：{len(degrade_warns)}/{len(ordered)} 段因 CosyVoice2 "
+                f"不可用改用 edge-tts 合成（非 preset 原声）。{degrade_warns[0]}"
+            )
+            logger.warning("task%s %s", task.id, dw)
+            task.error_message = dw
 
         seg_json.write_text(json.dumps(ordered, ensure_ascii=False), encoding="utf-8")
         return await self._finalize_tts(task, ordered, output_dir)

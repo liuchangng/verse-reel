@@ -324,6 +324,22 @@ async def generate_tts(
                 chosen = "edge-tts"
                 logger.info("CosyVoice2 不可用（模型未加载/未配置参考音频），降级到 edge-tts")
 
+        # 可用性前置检查（2026-09-10 任务005：日志谎称"将降级 edge-tts"实则 raise）。
+        # 旧逻辑 preset 有 ref_wav 就强制 cosyvoice，_load_cosyvoice 导入失败
+        # （No module named 'cosyvoice'）后直接 raise → 每镜重试 3 次 → 静音兜底。
+        # 现在合成前先做一次廉价加载检查（带锁+缓存），不可用就真降级 edge-tts，
+        # 片段照常有声（音色不同），并在结果里带 warning 供 pipeline 上浮。
+        warn_note: Optional[str] = None
+        if chosen == "cosyvoice":
+            model = await asyncio.to_thread(_load_cosyvoice)
+            if model is None:
+                chosen = "edge-tts"
+                warn_note = (
+                    f"CosyVoice2 不可用（运行库缺失或模型加载失败），已降级 edge-tts "
+                    f"音色 {settings.tts_fallback_voice}；preset={preset_id or '无'} 的原声未生效"
+                )
+                logger.warning("TTS 降级: %s", warn_note)
+
         # 输出文件名纳入完整身份（text+engine+voice+speed+preset+ref），
         # 避免「相同文案 + 不同音色/参考音」撞同名文件导致自动选声切换失效；
         # 同名即同身份，可直接复用缓存。
@@ -350,7 +366,8 @@ async def generate_tts(
             )
             content_type = "audio/wav"
         else:
-            audio_data, duration_ms = await tts_edge(text, voice, speed)
+            eff_voice = settings.tts_fallback_voice if warn_note else voice
+            audio_data, duration_ms = await tts_edge(text, eff_voice, speed)
             content_type = "audio/mpeg"
 
         filepath.write_bytes(audio_data)
@@ -363,6 +380,7 @@ async def generate_tts(
             "audio_path": str(filepath),
             "duration_ms": duration_ms,
             "error": None,
+            "warning": warn_note,
         }
 
     except Exception as e:

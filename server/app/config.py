@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     tts_voice: str = Field(default="zh-CN-YunxiNeural")
     tts_speed: float = Field(default=1.0)
     tts_engine: str = Field(default="auto")  # auto | cosyvoice | edge-tts
+    # CosyVoice 不可用（运行库缺失/模型未加载）时的 edge-tts 降级音色。
+    # 虹云（女声）降级默认晓晓；可按需换成 zh-CN-XiaoyiNeural 等。
+    tts_fallback_voice: str = Field(default="zh-CN-XiaoxiaoNeural")
     # TTS 并发（独立服务，可高于 1）
     tts_concurrency: int = Field(default=3)
     # ====== CosyVoice2 参考音频（zero-shot 克隆用）======
