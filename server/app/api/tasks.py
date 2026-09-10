@@ -498,6 +498,35 @@ async def publish_task(
     }
 
 
+@router.post("/{task_id}/publish-content")
+async def generate_task_publish_content(
+    task_id: int,
+    platforms: list[str] = Query(["douyin", "xiaohongshu", "kuaishou"], description="要生成文案的平台列表"),
+    db: AsyncSession = Depends(get_db),
+):
+    """按需生成各平台的发布文案（标题/描述/话题），供详情页视频卡片下方展示。
+
+    设计（2026-09-10 Q3）：前端"查看时按需生成"——不进流水线、不建 DB 字段，
+    用 LLM 按各平台字数/话题规范产出一组吸睛文案，进程内按 (task_id, script 哈希,
+    platforms) 缓存，同文案重复进详情页不重复调 LLM。LLM 失败的平台回退规则版。
+    """
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 诗词元信息（作者/朝代）增强文案相关性；缺失不阻断（LLM 仍可用标题+脚本）
+    poem = await db.get(Poem, task.poem_id)
+    copy = await publisher_service.generate_platform_copy(
+        task_id=task_id,
+        script=task.script or "",
+        poem_title=(poem.title if poem else "") or "",
+        author=(poem.author if poem else "") or "",
+        dynasty=(poem.dynasty if poem else "") or "",
+        platforms=platforms,
+    )
+    return {"task_id": task_id, "content": copy}
+
+
 @router.post("/{task_id}/review")
 async def review_task(
     task_id: int,

@@ -1,12 +1,47 @@
 """发布服务 - 自动发布到各平台"""
+import hashlib
+import json
 import logging
+import re
 import subprocess
 from typing import Optional
 from dataclasses import dataclass
 
 from app.config import settings
+from app.services.agnes import agnes_client
 
 logger = logging.getLogger(__name__)
+
+
+# 各平台发布文案字段规范（2026-09-10 Q3 调研沉淀，LLM 生成时注入 prompt 的硬约束）。
+# 依据：抖音 LobeHub douyin-smart-publisher / skillsmp；小红书 发现报告实操宝典 / 优畅主题；
+# 快手 新榜 newrank 发布规则解析 / 虾果。字数与话题数各平台差异明显，故按平台分别约束。
+PLATFORM_COPY_SPECS = {
+    "douyin": {
+        "name": "抖音",
+        "title_max": 55,
+        "title_min": 20,
+        "desc_range": "100-200字",
+        "tag_count": "3-5个（1-2个精准大话题 + 2-3个垂直小话题）",
+        "style_hint": "前3秒定生死：标题用悬念/痛点+核心关键词+emoji，前15字必埋核心词；正文钩子开头，结尾带互动引导。",
+    },
+    "xiaohongshu": {
+        "name": "小红书",
+        "title_max": 20,
+        "title_min": 12,
+        "desc_range": "50-200字",
+        "tag_count": "5-15个（核心标签+长尾标签+话题标签三级）",
+        "style_hint": "标题短平快含关键词+行动导向；正文场景化引入，带emoji增节奏，话题覆盖项目/地域/行业关键词。",
+    },
+    "kuaishou": {
+        "name": "快手",
+        "title_max": 30,
+        "title_min": 15,
+        "desc_range": "50字内",
+        "tag_count": "1-3个（1个核心大流量话题 + 2-3个精准内容话题）",
+        "style_hint": "标题用疑问句/感叹句引互动，禁用'震惊''必看'等诱导词；正文与画面强关联，结尾开放式提问引评论。",
+    },
+}
 
 
 @dataclass
@@ -203,6 +238,151 @@ class PublisherService:
             "description": description,
             "tags": tags,
         }
+
+    # LLM 生成的平台文案进程内缓存：key=(task_id, script 哈希, platforms 串)。
+    # 前端"查看时按需生成"，同一任务同文案短时间内多次进详情页不重复调 LLM。
+    # 脚本一旦变化（regenerate script）哈希即变 → 自然失效，无需手动清。
+    _copy_cache: dict = {}
+    _COPY_CACHE_MAX = 64  # 防止无界增长（多任务长跑场景）
+
+    def _copy_cache_key(self, task_id, script, platforms) -> str:
+        s_hash = hashlib.md5((script or "").encode("utf-8")).hexdigest()[:12]
+        return f"{task_id}:{s_hash}:{','.join(sorted(platforms))}"
+
+    def _copy_cache_get(self, key):
+        return self._copy_cache.get(key)
+
+    def _copy_cache_set(self, key, value):
+        if len(self._copy_cache) >= self._COPY_CACHE_MAX:
+            # 简单粗清理（非 LRU，够用）：留一半
+            for k in list(self._copy_cache)[: self._COPY_CACHE_MAX // 2]:
+                self._copy_cache.pop(k, None)
+        self._copy_cache[key] = value
+
+    async def generate_platform_copy(
+        self,
+        task_id: int,
+        script: str,
+        poem_title: str,
+        author: str = "",
+        dynasty: str = "",
+        platforms: Optional[list] = None,
+    ) -> dict:
+        """按需（查看时）用 LLM 为各平台生成吸引眼球的发布文案。
+
+        Args:
+            task_id: 任务 ID（仅用于缓存键，便于同任务同文案复用）
+            script: 文案脚本正文（LLM 取材源）
+            poem_title: 诗词标题
+            author/dynasty: 作者/朝代（增强标题信息量与相关性）
+            platforms: 要生成的平台列表；None 时取全部已定义规范平台
+
+        Returns:
+            {platform: {"title": ..., "description": ..., "tags": [..], "generated": True/False}}
+            LLM 失败的平台回退到 generate_publish_content 的规则版（generated=False），绝不空。
+        """
+        platforms = platforms or list(PLATFORM_COPY_SPECS.keys())
+        platforms = [p for p in platforms if p in PLATFORM_COPY_SPECS]
+        if not platforms:
+            return {}
+
+        cache_key = self._copy_cache_key(task_id, script, platforms)
+        cached = self._copy_cache_get(cache_key)
+        if cached:
+            return cached
+
+        result = {}
+        # 1) 规则版兜底（LLM 失败/部分缺失时保证每个平台都有内容）
+        for p in platforms:
+            rule = await self.generate_publish_content(
+                script=script or "", poem_title=poem_title, platform=p
+            )
+            result[p] = {**rule, "generated": False}
+
+        if not script:
+            return result  # 没有文案可取材，直接返回规则版
+
+        # 2) LLM 一次生成所有请求平台的文案（按各平台字数/话题规范注入 prompt）
+        try:
+            spec_lines = []
+            for p in platforms:
+                s = PLATFORM_COPY_SPECS[p]
+                spec_lines.append(
+                    f'- 平台 {s["name"]}({p})：标题 {s["title_min"]}-{s["title_max"]} 字；'
+                    f'描述 {s["desc_range"]}；话题 {s["tag_count"]}；风格：{s["style_hint"]}'
+                )
+            sys_prompt = (
+                "你是资深短视频运营文案，专精古诗词解读类内容的平台化发布文案。"
+                "要求：标题要吸引眼球、含核心关键词、与诗词强相关；"
+                "描述贴合文案脚本、口语化；话题标签精准不堆砌。"
+                "严格按下方各平台字数/数量规范产出，且每个平台标题与文案正文不得雷同。"
+                "只输出一个 JSON 对象，不要任何解释或 markdown。"
+            )
+            user_prompt = f"""请为以下古诗词短视频解说，为指定平台各生成一组发布文案。
+
+【诗词】{poem_title}（{author}·{dynasty}）
+【文案脚本】
+{script[:800]}
+
+【各平台字段规范】
+{chr(10).join(spec_lines)}
+
+请输出 JSON，键为平台 id，值含 title/description/tags 三个字段，tags 为字符串数组：
+{{
+  "douyin": {{"title": "...", "description": "...", "tags": ["...", "..."]}},
+  "xiaohongshu": {{"title": "...", "description": "...", "tags": ["..."]}},
+  "kuaishou": {{"title": "...", "description": "...", "tags": ["..."]}}
+}}
+只包含上面要求的平台键。"""
+
+            raw = await agnes_client.generate_text(
+                [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=1500,
+                temperature=0.7,
+            )
+            parsed = self._parse_copy_json(raw)
+            # 用 LLM 结果覆盖对应平台（校验字段齐全 + 标题非空 + 字数软约束）
+            for p in platforms:
+                entry = parsed.get(p)
+                if isinstance(entry, dict) and str(entry.get("title", "")).strip():
+                    tags = entry.get("tags") or []
+                    if not isinstance(tags, list):
+                        tags = [str(tags)]
+                    result[p] = {
+                        "title": str(entry.get("title", "")).strip(),
+                        "description": str(entry.get("description", "")).strip(),
+                        "tags": [str(t) for t in tags if str(t).strip()],
+                        "generated": True,
+                    }
+        except Exception as e:
+            logger.warning(
+                f"[{task_id}] LLM 生成平台文案失败，回退规则版: {str(e)[:160]}"
+            )
+
+        self._copy_cache_set(cache_key, result)
+        return result
+
+    @staticmethod
+    def _parse_copy_json(text: str) -> dict:
+        """从 LLM 输出稳健提取平台文案 JSON（容忍 markdown/杂质/裸控制字符）。
+        解析失败返回 {}（调用方逐平台回退规则版），绝不抛错中断。"""
+        text = text or ""
+        if "```json" in text:
+            text = text.split("```json", 1)[1].split("```", 1)[0]
+        elif "```" in text:
+            text = text.split("```", 1)[1].split("```", 1)[0]
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
+        text = re.sub(r"[\x00-\x1f\x7f]", " ", text).strip()
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
 
 
 # 全局服务实例
