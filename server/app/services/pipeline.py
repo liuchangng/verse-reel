@@ -6,6 +6,7 @@ import asyncio
 import subprocess
 import httpx
 from pathlib import Path
+from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1083,8 +1084,53 @@ class PipelineEngine:
         ordered = [results[i] for i in sorted(results.keys())]
         if not ordered:
             return {"success": False, "error": "TTS 全部失败"}
+
+        # fail-loud 门禁（详见 _tts_loudness_gate）
+        gate = self._tts_loudness_gate(task, ordered)
+        if gate:
+            return gate
+
         seg_json.write_text(json.dumps(ordered, ensure_ascii=False), encoding="utf-8")
         return await self._finalize_tts(task, ordered, output_dir)
+
+    @staticmethod
+    def _tts_loudness_gate(task, ordered: list[dict]) -> Optional[dict]:
+        """fail-loud 门禁（2026-09-10 任务005事故，第二次无声片）。
+
+        旧逻辑所有段失败也照常合成静音 audio.mp3 → video 出"成功的无声片"，
+        用户侧零提示。现在：
+        - 全部段落都是静音兜底 → 返回失败 result（run_stage 的 tts 分支会
+          raise → Job 重试 → failed），不再产出无声成片；网络恢复后重新生成即可。
+        - 部分失败 → 保留兜底继续（画面/字幕不丢），但在 task.error_message
+          留下显式警告（仅 status=failed 时前端渲染红条，待审核态只作排障痕迹）。
+
+        Returns:
+            None = 通过（继续合成流程）；dict = 应直接返回的失败 result。
+        """
+        fallback_segs = [s for s in ordered if s.get("fallback")]
+        if not fallback_segs:
+            return None
+        err_brief = "; ".join(
+            f"镜{s['index']}: {(s.get('error') or '未知')[:120]}"
+            for s in sorted(fallback_segs, key=lambda x: x["index"])
+        )
+        if len(fallback_segs) == len(ordered):
+            return {
+                "success": False,
+                "error": (
+                    f"TTS 全部 {len(ordered)} 段失败并降级为静音，拒绝出无声片。"
+                    f"常见原因：edge-tts 网络不通/代理变更，恢复后重新生成即可。"
+                    f"分段错误: {err_brief}"
+                ),
+            }
+        warn = (
+            f"TTS 警告：{len(fallback_segs)}/{len(ordered)} 段降级为静音"
+            f"（段 {sorted(s['index'] for s in fallback_segs)}），成片对应段落无声。"
+            f"失败明细: {err_brief}"
+        )
+        logger.warning("task%s %s", task.id, warn)
+        task.error_message = warn
+        return None
 
     async def _finalize_tts(self, task: Task, segments: list[dict], output_dir: Path) -> dict:
         """合并所有 narration_{i}.* 为 audio.mp3（兼容前端 audio_url），返回总时长。
