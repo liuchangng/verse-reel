@@ -549,12 +549,14 @@ const connectWS = () => {
     if (data.image_urls) task.value.image_urls = data.image_urls
     if (data.video_url) task.value.video_url = data.video_url
     if (data.video_duration != null) task.value.video_duration = data.video_duration
-    // 阶段推进 → 刷新 Job 状态（步骤条数据源），失败不阻塞主流程
-    api.getTaskJobs(taskId.value).then(jobs => {
+    // 阶段 Job 状态已并入 WS 推送载荷（2026-09-10 刷屏修复）：
+    // 旧版这里每条推送都回源 GET /tasks/{id}/jobs → WS 每秒推一次就多一条
+    // HTTP 请求刷爆后端日志；现在直接消费 data.jobs，零回源。
+    if (data.jobs) {
       const map = {}
-      for (const j of (jobs.items || jobs || [])) map[j.stage] = j.status
+      for (const [stage, status] of Object.entries(data.jobs)) map[stage] = status
       jobsByStage.value = map
-    }).catch(() => {})
+    }
 
     // 终态时关闭 WS
     if (data.status === 'done' || data.status === 'failed' || data.status === 'pending_review') {

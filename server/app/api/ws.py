@@ -9,6 +9,7 @@ from sqlalchemy import select, or_
 
 from app.database import async_session_factory
 from app.models.task import Task
+from app.models.job import Job
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -72,11 +73,53 @@ def _ws_authorized(websocket: WebSocket) -> bool:
     return bool(token) and secrets.compare_digest(token, settings.app_token)
 
 
+async def _build_progress_payload(session, task_id: int) -> dict | None:
+    """构建单条 progress 推送载荷（独立成函数便于守护测试）。
+
+    载荷含 ``jobs``（stage -> status 映射，id 升序遍历每阶段留最新，与
+    ``_maybe_finalize`` 口径一致）——前端据此渲染步骤条，不再回源 GET /jobs
+    （2026-09-10 刷屏修复：旧版 WS 每秒推一条，前端每条都 GET 一次 /jobs）。
+    """
+    task = await session.get(Task, task_id)
+    if not task:
+        return None
+
+    img_urls = None
+    if task.image_urls:
+        try:
+            img_urls = json.loads(task.image_urls)
+        except Exception as exc:
+            logger.warning("任务 %s image_urls 解析失败: %s", task_id, exc)
+
+    job_rows = (await session.execute(
+        select(Job.stage, Job.status)
+        .where(Job.task_id == task_id)
+        .order_by(Job.id.asc())
+    )).all()
+    jobs_map: dict[str, str] = {}
+    for stage_name, job_status in job_rows:
+        jobs_map[stage_name] = job_status
+
+    return {
+        "type": "progress",
+        "task_id": task_id,
+        "status": task.status,
+        "current_stage": task.current_stage,
+        "progress": task.progress,
+        "script_score": task.script_score,
+        "image_score": task.image_score,
+        "image_urls": img_urls,
+        "video_url": task.video_url,
+        "video_duration": task.video_duration,
+        "jobs": jobs_map,
+    }
+
+
 @router.websocket("/progress/{task_id}")
 async def websocket_progress(websocket: WebSocket, task_id: int):
     """
     任务进度实时推送
-    
+
     客户端连接后，服务器会定时推送任务进度更新
     """
     if not _ws_authorized(websocket):
@@ -85,7 +128,7 @@ async def websocket_progress(websocket: WebSocket, task_id: int):
         return
 
     await manager.connect(websocket, task_id)
-    
+
     try:
         while True:
             # 检查是否有来自客户端的消息（保持连接）
@@ -96,34 +139,16 @@ async def websocket_progress(websocket: WebSocket, task_id: int):
                     await websocket.send_json({"type": "pong"})
             except asyncio.TimeoutError:
                 pass
-            
+
             # 查询最新进度
             async with async_session_factory() as session:
-                task = await session.get(Task, task_id)
-                if task:
-                    # 解析 image_urls
-                    img_urls = None
-                    if task.image_urls:
-                        try: img_urls = json.loads(task.image_urls)
-                        except Exception as exc:
-                            logger.warning("任务 %s image_urls 解析失败: %s", task_id, exc)
+                payload = await _build_progress_payload(session, task_id)
+                if payload:
+                    await manager.send_progress(task_id, payload)
 
-                    await manager.send_progress(task_id, {
-                        "type": "progress",
-                        "task_id": task_id,
-                        "status": task.status,
-                        "current_stage": task.current_stage,
-                        "progress": task.progress,
-                        "script_score": task.script_score,
-                        "image_score": task.image_score,
-                        "image_urls": img_urls,
-                        "video_url": task.video_url,
-                        "video_duration": task.video_duration,
-                    })
-            
             # 每秒推送一次
             await asyncio.sleep(1)
-            
+
     except WebSocketDisconnect:
         manager.disconnect(websocket, task_id)
     except Exception as e:
