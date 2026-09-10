@@ -30,8 +30,8 @@ async def api_env(monkeypatch):
 
     calls = []
 
-    async def fake_enqueue(task_id, stages=None, clear_outputs=False):
-        calls.append({"task_id": task_id, "stages": stages})
+    async def fake_enqueue(task_id, stages=None, clear_outputs=False, source="unknown"):
+        calls.append({"task_id": task_id, "stages": stages, "source": source})
         return len(stages) if stages else len(STAGE_ORDER)
 
     monkeypatch.setattr(tasks_api.queue_service, "enqueue_task", fake_enqueue)
@@ -52,6 +52,8 @@ async def test_create_task_enqueues_all_stages(api_env):
     assert len(calls) == 1, "create_task 应恰好入队一次"
     assert calls[0]["task_id"] == resp["id"]
     assert resp["enqueued_count"] == len(STAGE_ORDER)
+    # 审计：入队必须自报来源，否则"任务莫名又重新生成"无法追溯
+    assert calls[0]["source"] == "create_task"
 
     async with factory() as db:
         task = (await db.execute(select(Task).where(Task.id == resp["id"]))).scalar_one()
