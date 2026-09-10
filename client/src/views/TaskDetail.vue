@@ -225,6 +225,40 @@
             <button class="btn-text" @click="exportVideo(g.url)" :title="`下载 ${g.label} ${g.ratio} 成片`">📥 下载</button>
           </div>
           <video :src="g.url" controls style="width:100%;max-height:340px;background:#000;"></video>
+          <!-- Q3：按组内各平台分块展示 LLM 生成的发布文案（标题/描述/话题） -->
+          <div class="video-copy-blocks">
+            <div
+              v-for="p in g.platformIds"
+              :key="p"
+              class="copy-block"
+              v-show="copyByPlatform[p]"
+            >
+              <div class="copy-block-head">
+                <span class="copy-plat">{{ PLAT_INFO[p] ? PLAT_INFO[p].name : p }}</span>
+                <span class="copy-gen" v-if="copyByPlatform[p].generated">AI生成</span>
+              </div>
+              <div class="copy-field" v-if="copyByPlatform[p].title">
+                <span class="copy-field-label">标题</span>
+                <span class="copy-field-val">{{ copyByPlatform[p].title }}</span>
+                <button class="copy-btn" @click="copyField(p,'title')" title="复制标题">📋</button>
+              </div>
+              <div class="copy-field" v-if="copyByPlatform[p].description">
+                <span class="copy-field-label">描述</span>
+                <span class="copy-field-val">{{ copyByPlatform[p].description }}</span>
+                <button class="copy-btn" @click="copyField(p,'description')" title="复制描述">📋</button>
+              </div>
+              <div class="copy-field" v-if="copyByPlatform[p].tags && copyByPlatform[p].tags.length">
+                <span class="copy-field-label">话题</span>
+                <span class="copy-field-val copy-tags">
+                  <span v-for="t in copyByPlatform[p].tags" :key="t" class="copy-tag">{{ t.startsWith('#') ? t : '#' + t }}</span>
+                </span>
+                <button class="copy-btn" @click="copyField(p,'tags')" title="复制话题">📋</button>
+              </div>
+            </div>
+            <div v-if="copyLoading && !Object.keys(copyByPlatform).length" class="copy-block-loading">
+              <i></i> 正在生成各平台发布文案…
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -425,20 +459,21 @@ const platformRatio = (p) => (PLAT_INFO[p] && PLAT_INFO[p].ratio) || '-'
 // 按比例分组：相同画幅的平台共用一个预览卡片，标题用平台名"/"拼接（如"抖音/快手"）
 // 避免同源视频重复展示；不同比例（如 9:16 与 16:9）独立卡片以呈现裁剪差异
 const videoGroupsByRatio = computed(() => {
-  const groups = new Map()  // ratio -> { ratio, platforms:[], url }
+  const groups = new Map()  // ratio -> { ratio, platformIds:[], names:[], url }
   for (const [plat, url] of Object.entries(platformVideos.value)) {
     const info = PLAT_INFO[plat] || { name: plat, ratio: '?' }
     const ratio = info.ratio
     if (!groups.has(ratio)) {
-      groups.set(ratio, { ratio, platforms: [info.name], url })
+      groups.set(ratio, { ratio, platformIds: [plat], names: [info.name], url })
     } else {
       const g = groups.get(ratio)
-      if (!g.platforms.includes(info.name)) g.platforms.push(info.name)
+      if (!g.platformIds.includes(plat)) { g.platformIds.push(plat); g.names.push(info.name) }
     }
   }
   return Array.from(groups.values()).map(g => ({
     ratio: g.ratio,
-    label: g.platforms.join('/'),
+    label: g.names.join('/'),
+    platformIds: g.platformIds,   // 组内平台 id（供按需请求各平台文案）
     url: withOutputToken(g.url),
   }))
 })
@@ -448,6 +483,40 @@ const videoGroupsByRatio = computed(() => {
 // 这里收 url 参数——各卡导自己那张成片的带 token URL，页头统一入口已删。
 const exportVideo = (url) => url ? window.open(url) : alert('视频尚未生成')
 const previewImage = (url) => window.open(url, '_blank')
+
+// ====== Q3：视频卡片下方按需 LLM 平台文案（标题/描述/话题） ======
+// 有成片（videoGroupsByRatio 非空）才拉取；onMounted 触发一次，
+// 按各视频组内平台 id 请求，后端 LLM 按平台字数/话题规范生成 + 进程内缓存。
+const copyByPlatform = ref({})   // { platform: { title, description, tags, generated } }
+const copyLoading = ref(false)
+const copyPlatforms = computed(() => {
+  const ids = []
+  for (const g of videoGroupsByRatio.value) {
+    for (const p of g.platformIds) if (!ids.includes(p)) ids.push(p)
+  }
+  return ids
+})
+const loadPublishContent = async () => {
+  if (copyLoading.value) return
+  if (copyPlatforms.value.length === 0) return
+  copyLoading.value = true
+  try {
+    const r = await api.generatePublishContent(taskId.value, copyPlatforms.value)
+    if (r && r.content) Object.assign(copyByPlatform.value, r.content)
+  } catch (e) { /* 生成失败静默：卡片不显示文案块，不阻塞页面 */ }
+  finally { copyLoading.value = false }
+}
+// 一键复制某平台某字段（标题/描述/话题）到剪贴板，供手动粘贴到各 App
+const copyField = async (plat, field) => {
+  const c = copyByPlatform.value[plat]
+  if (!c) return
+  let text = ''
+  if (field === 'title') text = c.title
+  else if (field === 'description') text = c.description
+  else if (field === 'tags') text = (c.tags || []).map(t => t.startsWith('#') ? t : '#' + t).join(' ')
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) { window.prompt('复制（手动全选复制）', text) }
+}
 
 // 审核相关
 const showRejectInput = ref(false)
@@ -591,6 +660,8 @@ onMounted(async () => {
   connectWS()
   // 轮询保底
   startPolling()
+  // Q3：有成片时按需拉取各平台 LLM 发布文案（视频卡片下方展示）
+  loadPublishContent()
 })
 onUnmounted(() => cleanup())
 </script>
@@ -723,6 +794,23 @@ onUnmounted(() => cleanup())
 .video-card { border: 1px solid var(--color-border-light); border-radius: var(--radius-md); overflow: hidden; background: var(--color-bg); }
 .video-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--color-border-light); }
 .video-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+/* Q3：视频卡片下方"按平台分块"的发布文案块 */
+.video-copy-blocks { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; background: var(--color-bg); }
+.copy-block { border: 1px solid var(--color-border-light); border-radius: var(--radius-md); padding: 8px 10px; background: var(--color-bg-card); }
+.copy-block-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.copy-plat { font-size: 13px; font-weight: 600; color: var(--color-primary); }
+.copy-gen { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: var(--radius-full); background: rgba(201,166,107,.14); color: #8b6914; border: 1px solid rgba(201,166,107,.4); }
+.copy-field { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-top: 1px dashed var(--color-border-light); }
+.copy-field:first-of-type { border-top: none; }
+.copy-field-label { flex-shrink: 0; font-size: 11px; color: var(--color-text-muted); width: 28px; padding-top: 2px; }
+.copy-field-val { flex: 1; min-width: 0; font-size: 13px; color: var(--color-text); line-height: 1.5; word-break: break-word; }
+.copy-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.copy-tag { font-size: 11px; padding: 1px 7px; border-radius: var(--radius-full); background: #e6f7ff; color: #096dd9; }
+.copy-btn { flex-shrink: 0; border: 1px solid var(--color-border-light); background: transparent; border-radius: 6px; cursor: pointer; padding: 2px 6px; font-size: 12px; line-height: 1; color: var(--color-text-secondary); transition: all .2s; }
+.copy-btn:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.copy-block-loading { font-size: 13px; color: var(--color-text-muted); padding: 6px 4px; display: flex; align-items: center; gap: 8px; }
+.copy-block-loading i { width: 9px; height: 9px; border-radius: 50%; background: #faad14; display: inline-block; animation: pulse 1s infinite; }
 .plat-badge { font-size: 13px; font-weight: 600; }
 .plat-ratio { font-size: 11px; background: #e6f7ff; color: #096dd9; padding: 1px 8px; border-radius: var(--radius-full); font-weight: 600; }
 

@@ -161,6 +161,17 @@ export const publishTask = async (id, platforms = ['douyin']) => {
   return response
 }
 
+// 按需生成各平台发布文案（标题/描述/话题），供视频卡片下方展示（2026-09-10 Q3）
+// platforms: 要生成的平台列表；后端 LLM 按各平台字数/话题规范产出 + 进程内缓存
+// 返回 { task_id, content: { [platform]: { title, description, tags, generated } } }
+export const generatePublishContent = async (id, platforms = ['douyin', 'xiaohongshu', 'kuaishou']) => {
+  const response = await apiClient.post(`/tasks/${id}/publish-content`, null, {
+    params: { platforms },
+    paramsSerializer: { indices: false },
+  })
+  return response
+}
+
 // WebSocket 连接
 // 产物 URL 追加 token（review IMPORTANT-1 配套）：
 // 浏览器 <video>/<img>/window.open 的媒体请求无法携带 Authorization 头，
@@ -262,6 +273,7 @@ export default {
   reviewTask,
   regenerateTask,
   publishTask,
+  generatePublishContent,
   createProgressWebSocket,
   getSettings,
   updateSettings,
