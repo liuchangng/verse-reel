@@ -86,6 +86,17 @@ class TestOutputsAuth:
         with TestClient(app) as client:
             assert client.get("/outputs/x.mp4?token=wrong").status_code == 401
 
+    def test_outputs_no_cache_header(self, auth_headers, monkeypatch, tmp_path):
+        """重生成后同名产物 URL 不变，无 Cache-Control 时浏览器启发式缓存会播旧文件
+        （task_5 无声事件根因）。必须带 no-cache 强制 revalidate。"""
+        monkeypatch.setattr(settings, "output_dir", str(tmp_path))
+        f = tmp_path / "task_3_final.mp4"
+        f.write_text("v")
+        with TestClient(app) as client:
+            r = client.get("/outputs/task_3_final.mp4", headers=auth_headers)
+            assert r.status_code == 200
+            assert r.headers.get("cache-control") == "no-cache"
+
     def test_outputs_traversal_blocked(self, auth_headers, monkeypatch, tmp_path):
         """目录穿越（%2e%2e）→ 404，不得逃出产物目录。"""
         monkeypatch.setattr(settings, "output_dir", str(tmp_path))

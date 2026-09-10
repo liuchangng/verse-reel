@@ -140,7 +140,11 @@ async def serve_output(
     if not full.startswith(base + os.sep) or not os.path.isfile(full):
         raise HTTPException(status_code=404, detail="未找到")
     return FileResponse(
-        full, media_type=mimetypes.guess_type(full)[0] or "application/octet-stream"
+        full, media_type=mimetypes.guess_type(full)[0] or "application/octet-stream",
+        # no-cache：重生成后同名文件（如 task_5/final.mp4）URL 不变，浏览器仅有
+        # last-modified/etag 时按启发式缓存直接用磁盘旧文件 → 播放旧静音成片。
+        # no-cache 强制每次 revalidate：文件已变则返回新内容，未变则 304 免重传。
+        headers={"Cache-Control": "no-cache"},
     )
 
 
