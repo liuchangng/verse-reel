@@ -93,3 +93,9 @@ server/scripts/repro_*.py
 server/scripts/test_*.py
 server/scripts/verify_*.py
 # === end 一次性调试产物 ===
+
+# CosyVoice 本体（git clone --recursive 的第三方仓库，含子模块，不进项目库）
+server/third_party/
+
+# CosyVoice 本体（git clone --recursive 的第三方仓库，含子模块，不进项目库）
+server/third_party/

@@ -10,6 +10,7 @@
 audio_path（本地产物绝对路径）供 pipeline 直接落盘，省去一次 HTTP 回环。
 """
 import os
+import sys
 import json
 import io
 import hashlib
@@ -42,6 +43,23 @@ _cosyvoice_available = False
 _cosyvoice_load_lock = threading.Lock()
 
 
+def _ensure_cosyvoice_on_path() -> None:
+    """把 third_party/CosyVoice 及其 Matcha-TTS 子模块注入 sys.path。
+
+    背景（2026-09-10）：cosyvoice 不在 PyPI，pyproject 的 [cosyvoice] extra
+    只覆盖其第三方依赖，本体必须来自 Git 仓库。采用「clone 到
+    server/third_party/CosyVoice（--recursive 含 Matcha-TTS 子模块）+ 运行时
+    sys.path 注入」而非 uv git 源安装——uv 不拉子模块，装上也 import 不了；
+    且纯 sys.path 注入不进 uv.lock，不会被 uv sync 剪掉。
+    """
+    repo = Path(__file__).resolve().parents[2] / "third_party" / "CosyVoice"
+    candidates = [repo, repo / "third_party" / "Matcha-TTS"]
+    for p in candidates:
+        sp = str(p)
+        if p.exists() and sp not in sys.path:
+            sys.path.insert(0, sp)
+
+
 def _load_cosyvoice():
     """延迟加载 CosyVoice2 模型，返回模型或 None（失败降级）。"""
     global _cosyvoice_model, _cosyvoice_available
@@ -55,6 +73,8 @@ def _load_cosyvoice():
             return _cosyvoice_model
         try:
             import torch  # 复用 Audio2Sheet venv 的 torch（cp312/cu128）
+
+            _ensure_cosyvoice_on_path()
             from cosyvoice.cli.cosyvoice import CosyVoice2
 
             if not MODEL_DIR.exists():
