@@ -1,6 +1,6 @@
 # 古诗词短视频工厂
 
-基于 Agnes AI 免费 API 的古诗词短视频**自动化生产系统**：从 200 万+ 首古诗词中智能选题、AI 生成文案与分镜、AI 出图出视频、多平台适配与发布，全流程可视化监控。
+基于**兼容 OpenAI 的 LLM API**（文本 / 图像 / 视频生成，OpenAI 兼容接口）的古诗词短视频**自动化生产系统**：从 200 万+ 首古诗词中智能选题、AI 生成文案与分镜、AI 出图出视频、多平台适配与发布，全流程可视化监控。
 
 > 一条流水线把一首古诗词变成可直接发布到抖音 / 快手 / 小红书的竖屏短视频。
 
@@ -56,10 +56,12 @@
 - **Pinia** - 状态管理
 - **WebSocket** - 实时进度推送
 
-### AI 服务（Agnes AI 免费额度）
-- **agnes-2.5-flash** - 文本生成（文案 / 分镜 / 评分 / 发布文案）
-- **agnes-image-2.1-flash** - 图片生成（定妆照 / 分镜图）
-- **agnes-video-v2.0** - 视频生成（图生视频）
+### AI 服务（兼容 OpenAI 的 LLM API）
+- **文本模型** - 文案 / 分镜 / 评分 / 发布文案（走 OpenAI 兼容 `chat/completions` 接口）
+- **图像模型** - 定妆照 / 分镜图（OpenAI 兼容 `images/generations` 接口）
+- **视频模型** - 图生视频（OpenAI 兼容视频生成接口）
+
+> 模型名 / Base URL / API Key 均在系统设置页可配置，或写入 `.env`；项目不绑定任何特定厂商，任何兼容 OpenAI 协议的服务均可接入。
 
 ## 如何使用
 
@@ -68,7 +70,7 @@
 - **uv**（含 Python 3.12 托管，后端无需全局 Python）
 - **Node.js 18+**
 - **ffmpeg**（视频合成/字幕烧录依赖，需 `ffmpeg` / `ffprobe` 在 PATH）
-- **Agnes AI API Key**（免费额度）
+- **LLM API Key**（兼容 OpenAI 的接口，任意厂商均可）
 
 ### 2. 安装依赖
 
@@ -89,7 +91,7 @@ npm install
 
 ### 3. 配置
 
-复制环境变量模板为 `.env`，填入你的 Agnes AI API Key：
+复制环境变量模板为 `.env`，填入你的 LLM API Key（兼容 OpenAI 的接口）：
 
 ```bash
 cp server/.env.example server/.env      # 后端（API Key、APP_TOKEN 等）
@@ -118,9 +120,15 @@ npm run dev                                  # http://localhost:5173
 
 ### 5. 导入古诗词数据
 
+数据源（CNKGraph 古诗词语料，约 200 万+ 首）：
+
+- **下载**：<https://c.cnkgraph.com/data/cnkgraph.writings.zip>
+
+解压后将 `CNKGraph.Writings.xml` 导入：
+
 ```bash
 cd server
-python scripts/import_xml.py --file "G:/cnkgraph/CNKGraph.Writings.xml"
+python scripts/import_xml.py --file "path/to/CNKGraph.Writings.xml"
 ```
 
 导入后诗词库即可检索与建任务（约 200 万+ 首）。
@@ -173,7 +181,7 @@ python scripts/import_xml.py --file "G:/cnkgraph/CNKGraph.Writings.xml"
 
 ### Generator-Critic 架构
 
-系统使用同一个大模型（agnes-2.5-flash）扮演两个角色：
+系统使用同一个 LLM 模型（兼容 OpenAI 的文本模型）扮演两个角色：
 
 1. **生成者**：负责生成文案、分镜提示词
 2. **评判者**：负责评分、给出改进建议
