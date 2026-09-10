@@ -116,7 +116,59 @@ async def test_fallback_flagged_segments_are_regenerated(env):
 
 @pytest.mark.asyncio()
 async def test_healthy_segments_still_reused(env):
-    """健康分段（有声 + 文本一致 + 无标记）仍走复用，不浪费 TTS 配额。"""
+    """健康分段（有声 + 文本一致 + 无标记 + 音色指纹匹配）仍走复用，不浪费 TTS 配额。"""
+    task, storyboard, out_dir, calls = env
+    tdir = out_dir / "task_99"
+    tdir.mkdir()
+    # 由当前代码计算音色指纹，模拟"同一音色身份下本代码刚写出的分段"
+    fp = PipelineEngine()._tts_voice_fingerprint(task)
+    entries = []
+    for i in range(2):
+        f = tdir / f"narration_{i}.mp3"
+        _make_audio(f, "sound")
+        entries.append({"index": i, "text": f"第{'一二'[i]}镜旁白",
+                        "duration": 0.5, "path": str(f), "voice_fp": fp})
+    (tdir / "tts_segments.json").write_text(
+        json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+
+    engine = PipelineEngine()
+    r = await engine._generate_tts_segments(task, storyboard, None)
+    assert calls["generate"] == 0, "音色身份未变的健康分段不得触发 TTS 调用"
+    assert r["success"] and len(r["segments"]) == 2
+
+
+@pytest.mark.asyncio()
+async def test_voice_fingerprint_change_forces_regen(env):
+    """音色身份变化（如 preset ref_wav 由带 BGM 的 ref_hongyun.wav 换成
+    人声分离版 ref_hongyun_clean.wav）必须强制重合成，不复用旧杂音旁白。
+    （2026-09-10 任务005：clean ref 已生成但成片仍用旧 BGM-ref 旁白）"""
+    task, storyboard, out_dir, calls = env
+    tdir = out_dir / "task_99"
+    tdir.mkdir()
+    cur_fp = PipelineEngine()._tts_voice_fingerprint(task)
+    # 旧分段带的是"另一个音色身份"的指纹（模拟 ref 换掉前合成）
+    stale_fp = cur_fp + "\x1f" + "ref_hongyun.wav"  # 必然 != cur_fp
+    entries = []
+    for i in range(2):
+        f = tdir / f"narration_{i}.mp3"
+        _make_audio(f, "sound")
+        entries.append({"index": i, "text": f"第{'一二'[i]}镜旁白",
+                        "duration": 0.5, "path": str(f), "voice_fp": stale_fp})
+    (tdir / "tts_segments.json").write_text(
+        json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+
+    engine = PipelineEngine()
+    r = await engine._generate_tts_segments(task, storyboard, None)
+    assert calls["generate"] == 2, "音色身份变化必须重新生成旁白"
+    # 重合成后写回的分段指纹 = 当前指纹
+    saved = json.loads((tdir / "tts_segments.json").read_text(encoding="utf-8"))
+    assert all(s.get("voice_fp") == cur_fp for s in saved), "新分段应带当前音色指纹"
+
+
+@pytest.mark.asyncio()
+async def test_missing_voice_fp_legacy_forces_regen_once(env):
+    """旧代码写出的分段（无 voice_fp 键）判为过期 → 一次性迁移重合成。
+    这是任务005 的真实场景：clean ref 落地前合成、无指纹的旧 BGM-ref 旁白。"""
     task, storyboard, out_dir, calls = env
     tdir = out_dir / "task_99"
     tdir.mkdir()
@@ -124,6 +176,7 @@ async def test_healthy_segments_still_reused(env):
     for i in range(2):
         f = tdir / f"narration_{i}.mp3"
         _make_audio(f, "sound")
+        # 故意不写 voice_fp 键，模拟旧代码产物
         entries.append({"index": i, "text": f"第{'一二'[i]}镜旁白",
                         "duration": 0.5, "path": str(f)})
     (tdir / "tts_segments.json").write_text(
@@ -131,8 +184,7 @@ async def test_healthy_segments_still_reused(env):
 
     engine = PipelineEngine()
     r = await engine._generate_tts_segments(task, storyboard, None)
-    assert calls["generate"] == 0, "健康分段不得触发 TTS 调用"
-    assert r["success"] and len(r["segments"]) == 2
+    assert calls["generate"] == 2, "缺音色指纹的旧分段必须重新生成（迁移）"
 
 
 @pytest.mark.asyncio()

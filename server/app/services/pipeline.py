@@ -933,12 +933,54 @@ class PipelineEngine:
             logger.warning("probe 时长失败 %s: %s", path, exc)
         return None
 
+    def _tts_voice_fingerprint(self, task: Task) -> str:
+        """TTS 音色身份指纹：合成该任务旁白时实际生效的音色参数集合。
+
+        2026-09-10 任务005：TTS 复用校验原先只看"文本一致/文件在/非静音"，
+        感知不到 preset 的 ref_wav 被换掉（ref_hongyun.wav 自带 BGM → 换成
+        人声分离版 ref_hongyun_clean.wav 后，重生成 subtitle 仍复用旧 BGM-ref
+        旁白，clean ref 一次都没用上，两个平台成片仍带杂音）。
+
+        指纹纳入：preset_id + 该 preset 解析出的 ref_wav/prompt_text + 全局
+        cosyvoice 参考音频 + instruct 文本 + tts 引擎/语速。任一变化 → 旁白
+        音色身份变化 → 复用校验判 stale 强制重合成。
+
+        Returns:
+            稳定字符串（各字段 join），旧段落缺失该键时返回空串（保守判 stale）。
+        """
+        from app.services.tts_core import get_preset
+
+        # 与 generate_tts 的 preset 选择口径一致（_generate_tts_segments 第 1001 行）：
+        # task.voice_preset 优先，回退 settings.default_voice_preset，再 None。
+        preset_id = (
+            getattr(task, "voice_preset", "")
+            or getattr(settings, "default_voice_preset", "")
+            or None
+        )
+        ref_wav = prompt_text = ""
+        if preset_id:
+            p = get_preset(preset_id) or {}
+            ref_wav = p.get("ref_wav") or ""
+            prompt_text = p.get("prompt_text") or ""
+        global_ref = getattr(settings, "cosyvoice_prompt_wav", "") or ""
+        global_ptext = getattr(settings, "cosyvoice_prompt_text", "") or ""
+        # preset 参考音优先覆盖全局（与 generate_tts 的覆盖顺序一致）
+        effective_ref = ref_wav or global_ref
+        effective_ptext = prompt_text or global_ptext
+        parts = [
+            preset_id or "",
+            effective_ref,
+            effective_ptext,
+            getattr(settings, "cosyvoice_instruct_text", "") or "",
+            getattr(settings, "tts_engine", ""),
+            str(getattr(settings, "tts_speed", "")),
+        ]
+        return "\x1f".join(parts)
+
     async def _generate_tts_segments(
         self, task: Task, storyboard: list[dict], db: AsyncSession, force: bool = False
     ) -> dict:
-        """逐镜 TTS：对每镜 narration 单独生成旁白，产出 narration_{i}.mp3 + tts_segments.json。
-
-        以图定音：每段旁白独立成文件，时长由 TTS 真实决定（ffprobe），
+        """逐镜 TTS：对每镜 narration 单独生成旁白，产出 narration_{i}.mp3 + tts_segments.json。        以图定音：每段旁白独立成文件，时长由 TTS 真实决定（ffprobe），
         后续 _build_segments 用 -shortest 让画面严格贴合旁白，时长天然精准，
         不再出现整段 TTS 倒推幻灯片导致的截断/错位。
 
@@ -964,6 +1006,9 @@ class PipelineEngine:
         # 条数一致 / 逐条文本一致（文案改了不得复用旧旁白）/ 文件存在 /
         # 非静音兜底（fallback 标记或 -80dB 以下数字静音，防历史兜底文件毒化成片）。
         seg_json = output_dir / "tts_segments.json"
+        # 音色身份指纹：preset 的 ref_wav / 全局参考音 / instruct / 引擎·语速任一变化，
+        # 旧旁白视为过期强制重合成（2026-09-10 任务005 修复，见 _tts_voice_fingerprint）。
+        cur_fp = self._tts_voice_fingerprint(task)
         if not force and seg_json.exists():
             try:
                 existing = json.loads(seg_json.read_text(encoding="utf-8"))
@@ -976,10 +1021,11 @@ class PipelineEngine:
                             (g["text"] for g in segs if g["index"] == s.get("index")), None
                         )
                         or self._is_silent_audio(s.get("path", ""))
+                        or s.get("voice_fp") != cur_fp
                     ]
                     if stale:
                         logger.warning(
-                            "task%s TTS 分段含静音/兜底/过期片段 %s，全部重新生成",
+                            "task%s TTS 分段含静音/兜底/过期/音色变化片段 %s，全部重新生成",
                             task.id, stale,
                         )
                     else:
@@ -1058,7 +1104,8 @@ class PipelineEngine:
                                 logger.debug(f"镜{idx}音频清洗跳过（异常）: {_e}")
                             results[idx] = {"index": idx, "text": text,
                                             "engine": eff_engine,
-                                            "duration": round(dur, 2), "path": str(local)}
+                                            "duration": round(dur, 2), "path": str(local),
+                                            "voice_fp": cur_fp}
                             logger.info(f"task{task.id} TTS 镜 {idx + 1}/{len(segs)} 完成 ({dur:.1f}s, {eff_engine})")
                             ok = True
                             break
@@ -1089,7 +1136,8 @@ class PipelineEngine:
                             results[idx] = {"index": idx, "text": text,
                                             "fallback": True,
                                             "error": str(last_err),
-                                            "duration": round(est, 2), "path": str(local)}
+                                            "duration": round(est, 2), "path": str(local),
+                                            "voice_fp": cur_fp}
                     except Exception as e2:
                         logger.error(f"镜 {idx} 静音兜底也失败: {e2}")
                 # 兜底：对"主路径清洗未成功"的片段（path 仍是原始 mp3/wav，即非
