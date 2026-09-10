@@ -16,7 +16,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -210,6 +210,7 @@ class QueueService:
         task_id: int,
         stages: Optional[list[str]] = None,
         clear_outputs: bool = False,
+        source: str = "unknown",
     ) -> int:
         """为任务创建阶段 Job（pending）。
 
@@ -217,6 +218,9 @@ class QueueService:
             task_id: 业务任务 ID
             stages: 要生成的阶段；默认全部
             clear_outputs: 是否清空该任务已有的视觉产物（用于重新生成）
+            source: 调用来源标识（create_task / regenerate / batch / recover ...），
+                    仅用于审计日志——2026-09-09 事故：任务"莫名又重新生成了一遍"却
+                    无法从 DB 反查是谁触发的。所有调用方必须自报来源。
         Returns:
             创建的 Job 数量
         """
@@ -226,8 +230,19 @@ class QueueService:
             # 清理该任务旧 Job：只删 pending/running（未产生历史、留着会重复消费），
             # 保留 done/failed 终态 Job 作为执行历史 —— 重新生成时进度弹窗的
             # 尝试记录是「追加」而不是清零（2026-09-09 用户定夺的语义）。
-            old = await session.execute(select(Job).where(Job.task_id == task_id))
-            for j in old.scalars().all():
+            old = (await session.execute(select(Job).where(Job.task_id == task_id))).scalars().all()
+            inflight = [j for j in old if j.status in ("pending", "running")]
+            if inflight:
+                # 审计：在途 Job 被覆盖 = 已在跑的分镜/视频会被丢弃重来（产物同时被
+                # clear_outputs 清空）。这类"用户没点却重新生成"的投诉曾无法定位，
+                # 这里把覆盖明细与来源打进 WARNING，便于事后追责。
+                logger.warning(
+                    "⚠️ 入队覆盖在途 Job task=%s source=%s stages=%s clear_outputs=%s "
+                    "被覆盖=[%s]",
+                    task_id, source, list(stages), clear_outputs,
+                    ",".join(f"#{j.id}:{j.stage}:{j.status}" for j in inflight),
+                )
+            for j in old:
                 if j.status in ("pending", "running"):
                     await session.delete(j)
 
@@ -272,7 +287,10 @@ class QueueService:
                 count += 1
             await session.commit()
 
-        logger.info(f"入队任务 {task_id}: {count} 个阶段 ({','.join(stages)})")
+        logger.info(
+            f"入队任务 {task_id}: {count} 个阶段 ({','.join(stages)}) "
+            f"source={source} clear_outputs={clear_outputs}"
+        )
         return count
 
     # ------------------------------------------------------------------ #
@@ -314,7 +332,7 @@ class QueueService:
                 f"（旧直跑路径遗留），补建全套阶段: {heal_ids}"
             )
             for tid in heal_ids:
-                await self.enqueue_task(task_id=tid)
+                await self.enqueue_task(task_id=tid, source="recover")
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -412,10 +430,29 @@ class QueueService:
                     await self._heal_prereqs(session, job)
                     continue  # 前置阶段未全部完成，跳过
 
-                # 认领：置 running（崩溃后由 recover 复位）
-                job.status = "running"
-                job.started_at = datetime.now(timezone.utc)
+                # 认领：原子 CAS（2026-09-10 并发加固 P0-A）
+                #
+                # 旧写法是「先改 ORM 对象再 commit」——SELECT 与 UPDATE 之间隔着多个
+                # await 点（依赖检查、自愈补建），另一消费者（--reload 重启窗口内的旧
+                # 子进程、误起的第二个实例、TestClient 触发的 lifespan）可能在同一窗口
+                # 读到同一个 pending Job 并各自派发，导致同一阶段被跑两遍、产物互相覆盖。
+                # 改为带 status='pending' 条件的原子 UPDATE，只有抢到（rowcount==1）才派发。
+                now = datetime.now(timezone.utc)
+                claimed = await session.execute(
+                    update(Job)
+                    .where(Job.id == job.id, Job.status == "pending")
+                    .values(status="running", started_at=now)
+                )
                 await session.commit()
+                if claimed.rowcount != 1:
+                    logger.warning(
+                        "⏭️ Job#%s task=%s stage=%s 已被其他消费者认领，本轮跳过",
+                        job.id, job.task_id, job.stage,
+                    )
+                    continue
+                # 同步内存对象，避免后续误用旧值（此后不再 commit，不会二次 UPDATE）
+                job.status = "running"
+                job.started_at = now
 
                 # 拿到信号量后再派发（保证全局并发受控）
                 await sem.acquire()
