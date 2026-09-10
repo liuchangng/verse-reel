@@ -581,6 +581,8 @@ const publishPlatforms = [
   { id: 'douyin', name: '抖音', icon: '🎵' },
   { id: 'xiaohongshu', name: '小红书', icon: '📕' },
   { id: 'kuaishou', name: '快手', icon: '⚡' },
+  { id: 'bilibili', name: 'B站', icon: '📺' },
+  { id: 'youtube', name: 'YouTube', icon: '▶️' },
 ]
 const openPublish = () => { publishPlatform.value = task.value.platform || 'douyin'; showPublishModal.value = true }
 const confirmPublish = async () => {

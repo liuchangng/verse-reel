@@ -242,7 +242,7 @@ class Settings(BaseSettings):
     # ====== 多平台输出配置 ======
     # 默认全平台输出（抖音/小红书/快手/B站），设置页"发布平台"的默认值；
     # 设为 ["douyin"] 可退回单平台模式。渲染阶段按此列表为每个平台生成对应尺寸视频。
-    output_platforms: list[str] = Field(default=["douyin", "xiaohongshu", "kuaishou", "bilibili"])
+    output_platforms: list[str] = Field(default=["douyin", "xiaohongshu", "kuaishou", "bilibili", "youtube"])
 
     # ====== 热点源配置 ======
     # NewsNow 自部署聚合服务（github.com/ourongxing/newsnow，Docker 一条命令），

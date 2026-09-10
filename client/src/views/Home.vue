@@ -11,6 +11,8 @@
           <option value="douyin">📱 抖音 (9:16)</option>
           <option value="xiaohongshu">📕 小红书 (3:4)</option>
           <option value="kuaishou">⚡ 快手 (9:16)</option>
+          <option value="bilibili">📺 B站 (16:9)</option>
+          <option value="youtube">▶️ YouTube (16:9)</option>
         </select>
         <button class="btn btn-primary" @click="batchCreateTasks">➕ 批量创建任务</button>
       </div>

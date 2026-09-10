@@ -355,7 +355,7 @@ const settings = reactive({
   min_image_score: 7,
   max_retries: 3,
   // 发布平台（全局默认；新建任务未指定时回退到此，用于多平台渲染）
-  output_platforms: ['douyin', 'xiaohongshu', 'kuaishou', 'bilibili'],
+  output_platforms: ['douyin', 'xiaohongshu', 'kuaishou', 'bilibili', 'youtube'],
   // 水印配置
   watermark_enabled: true,
   watermark_text: '昊康动漫',

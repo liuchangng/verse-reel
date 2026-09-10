@@ -182,7 +182,7 @@ const expandedId = ref(null)
 // 弹窗状态
 const showCreateModal = ref(false)
 const selectedPoem = ref(null)
-const selectedPublishPlatforms = ref(['douyin', 'xiaohongshu', 'kuaishou', 'bilibili'])
+const selectedPublishPlatforms = ref(['douyin', 'xiaohongshu', 'kuaishou', 'bilibili', 'youtube'])
 
 // 朝代和体裁选项（从API动态获取，这里提供默认值）
 const dynastyOptions = ['唐', '宋', '元', '明', '清', '先秦', '汉', '魏晋', '南北朝', '隋', '辽', '金', '遠古', '未知']

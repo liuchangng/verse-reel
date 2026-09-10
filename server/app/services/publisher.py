@@ -41,6 +41,22 @@ PLATFORM_COPY_SPECS = {
         "tag_count": "1-3个（1个核心大流量话题 + 2-3个精准内容话题）",
         "style_hint": "标题用疑问句/感叹句引互动，禁用'震惊''必看'等诱导词；正文与画面强关联，结尾开放式提问引评论。",
     },
+    "bilibili": {
+        "name": "B站",
+        "title_max": 80,
+        "title_min": 10,
+        "desc_range": "≤250字",
+        "tag_count": "最多10个（单个≤20字，建议3-5个）",
+        "style_hint": "标题可玩梗但需点题（20-30字最佳），简介放合集/系列信息+置顶引导三连；标签走「知识/传统文化」垂类，B站受众吃「硬核解读」。",
+    },
+    "youtube": {
+        "name": "YouTube",
+        "title_max": 100,
+        "title_min": 15,
+        "desc_range": "前150字最关键（上限5000字符，可放系列链接/时间轴）",
+        "tag_count": "3-5个hashtag（前3个显示在标题上方，用#开头）",
+        "style_hint": "标题前70字符最关键（移动端可见），含核心关键词；描述开头150字写清看点，正文可放时间轴与系列链接；结尾引导订阅/点赞，标签用#古诗词#classical等。",
+    },
 }
 
 
@@ -64,6 +80,7 @@ class PublisherService:
         "bilibili": "bilibili",
         "video_account": "tencent",
         "weibo": "weibo",
+        "youtube": "youtube",
     }
     
     async def publish_video(
@@ -331,7 +348,9 @@ class PublisherService:
 {{
   "douyin": {{"title": "...", "description": "...", "tags": ["...", "..."]}},
   "xiaohongshu": {{"title": "...", "description": "...", "tags": ["..."]}},
-  "kuaishou": {{"title": "...", "description": "...", "tags": ["..."]}}
+  "kuaishou": {{"title": "...", "description": "...", "tags": ["..."]}},
+  "bilibili": {{"title": "...", "description": "...", "tags": ["..."]}},
+  "youtube": {{"title": "...", "description": "...", "tags": ["..."]}}
 }}
 只包含上面要求的平台键。"""
 
