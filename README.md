@@ -204,4 +204,9 @@ python scripts/import_xml.py --file "path/to/CNKGraph.Writings.xml"
 
 ## License
 
-MIT
+本项目基于 **MIT 许可证**（见 [`LICENSE`](LICENSE)），并附加使用限制条款：
+
+- **仅供学习与研究**：代码、文档、数据脚本与产物模板面向学习 / 研究 / 个人练习免费开放。
+- **商用需授权**：任何商业使用（商用产品、SaaS、付费内容批量生产、企业生产经营等）**须事先联系版权持有人获得书面授权**（见 GitHub <https://github.com/liuchangng/verse-reel>）。
+
+完整条款以 [`LICENSE`](LICENSE) 为准。
