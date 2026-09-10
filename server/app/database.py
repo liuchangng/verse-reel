@@ -1,6 +1,7 @@
 """数据库连接和会话管理"""
 import logging
 
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -15,6 +16,38 @@ engine = create_async_engine(
     echo=settings.debug,
     future=True,
 )
+
+
+# ------------------------------------------------------------------ #
+# SQLite 并发 pragmas（2026-09-10 并发加固 P1-C）
+#
+# 背景：engine 建好后从未设过任何 PRAGMA，SQLite 默认 journal_mode=delete
+# （rollback journal）——**写事务会锁整库，读写互斥**。而本服务同时有四类
+# 写/读来源：队列消费者循环、pipeline 各阶段、REST API、WebSocket 每秒推
+# 进度。并发一上来就会撞 ``sqlite3.OperationalError: database is locked``，
+# 表现为"任务莫名失败 / 前端进度卡住"。
+#
+# - journal_mode=WAL：读写不再互斥（读不阻塞写，写不阻塞读），是 SQLite 并发
+#   的必备前提；该属性持久化在库文件里，设一次即可，每次连接设置无副作用。
+# - busy_timeout=15s：写写冲突时先自旋等待而不是立刻抛错（默认仅 5s）。
+# - synchronous=NORMAL：WAL 下安全且显著减少 fsync（仅 checkpoint 时落盘）。
+# ------------------------------------------------------------------ #
+_SQLITE_BUSY_TIMEOUT_MS = 15_000
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragmas(dbapi_conn, _connection_record):
+    """每个新建连接应用并发 pragmas（async engine 需挂 sync_engine）。"""
+    try:
+        cur = dbapi_conn.cursor()
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+            cur.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            cur.close()
+    except Exception as exc:  # pragma 失败不阻断启动，仅告警
+        logger.warning("SQLite pragma 设置失败（并发可能受限）：%s", exc)
 
 # 创建异步会话工厂
 async_session_factory = async_sessionmaker(
