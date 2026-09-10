@@ -12,6 +12,8 @@
 """
 import asyncio
 import logging
+import os
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -43,6 +45,117 @@ async def _load_job(job_id: int) -> Optional[Job]:
     """独立 session 读取 Job（用于视频节流预判，不阻塞 _run_job 的主事务）。"""
     async with async_session_factory() as session:
         return await session.get(Job, job_id)
+
+
+# ------------------------------------------------------------------ #
+# 进程级单实例锁（2026-09-10 并发加固 P0-B）
+#
+# QueueService 只是内存单例，"全局只有一个消费者"此前完全依赖「lifespan 只会跑
+# 一次」这个假设。真实破坏该假设的场景都存在：
+#   - start.bat 用 ``uvicorn --reload``：文件变更重启时新子进程已起、旧子进程未退，
+#     两个 lifespan 各起一个消费者；
+#   - 误起第二个实例（换端口即可绕过 8000 占用）；
+#   - 测试用 ``TestClient(app)`` 触发 lifespan（2026-09-09 已真实发生，见
+#     tests/test_queue_db_isolation.py 的事故复盘）。
+# 后果：同一 Job 被派发两次，且"任务间串行"（内存约定）同时失效。
+#
+# 方案：锁文件 + PID 活性 + 心跳超时三重判定。
+#   - 创建用 O_EXCL（原子），两进程同时抢占只有一个成功；
+#   - 持有者每轮刷新 mtime 作心跳，崩溃/僵死超过阈值可被抢占；
+#   - 进程已死（PID 不存在）立即回收，不会留下永久锁。
+# 拿不到锁的进程仍然提供 API（可入队、可查询），只是不消费队列。
+# ------------------------------------------------------------------ #
+_LOCK_FILENAME = ".queue.lock"
+_LOCK_HEARTBEAT_SEC = 120.0  # 心跳有效期：PID 存活但心跳停摆超时 → 视为陈旧锁
+
+
+def _lock_path() -> str:
+    """锁文件路径：与数据库同目录（测试可 monkeypatch 本函数改指向临时文件）。"""
+    db_path = settings.database_url.split("///", 1)[-1]
+    return os.path.join(os.path.dirname(db_path) or ".", _LOCK_FILENAME)
+
+
+def _pid_alive(pid: int) -> bool:
+    """进程存活判定（Windows 下 os.kill(pid, 0) 只检查存在性，不真正发信号）。"""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 存在但无权限：保守视为存活，不抢占
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_instance_lock() -> bool:
+    """尝试获取消费者单实例锁；失败返回 False（本进程不得启动消费者）。"""
+    path = _lock_path()
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+    except OSError:
+        pass
+
+    try:
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    pid = int((f.read() or "0").strip() or 0)
+            except (ValueError, OSError):
+                pid = 0
+            try:
+                age = time.time() - os.path.getmtime(path)
+            except OSError:
+                age = float("inf")
+
+            if _pid_alive(pid) and age < _LOCK_HEARTBEAT_SEC:
+                logger.warning(
+                    "⚠️ 队列锁被 pid=%s 持有（%.0fs 前心跳），本进程不启动消费者"
+                    " —— 若确认无其他实例在跑，删除 %s 后重启",
+                    pid, age, path,
+                )
+                return False
+
+            logger.warning(
+                "♻️ 回收陈旧队列锁（pid=%s 存活=%s，心跳 %.0fs 前）：%s",
+                pid, _pid_alive(pid), age, path,
+            )
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        # O_EXCL 保证原子：并发抢占时只有一个进程能创建成功
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        return True
+    except FileExistsError:
+        return False
+    except OSError as e:
+        logger.warning("队列锁获取失败（%s），本进程不启动消费者", e)
+        return False
+
+
+def _touch_instance_lock() -> None:
+    """刷新心跳（持有者每轮调用）。"""
+    try:
+        if os.path.exists(_lock_path()):
+            os.utime(_lock_path(), None)
+    except OSError:
+        pass
+
+
+def _release_instance_lock() -> None:
+    """释放锁（正常关闭时调用）。"""
+    try:
+        os.remove(_lock_path())
+    except OSError:
+        pass
 
 
 # 标准阶段顺序（用于依赖判断与最终态判定）
@@ -201,6 +314,7 @@ class QueueService:
         self._stop = False
         self._task: Optional[asyncio.Task] = None
         self._poll_interval = settings.queue_poll_interval
+        self._leader = False  # 是否持有队列消费权（单实例锁，见 _acquire_instance_lock）
 
     # ------------------------------------------------------------------ #
     # 生产者：入队一个任务的所有阶段
@@ -338,11 +452,25 @@ class QueueService:
     # 生命周期
     # ------------------------------------------------------------------ #
     async def start(self):
-        """启动消费者循环（在 FastAPI lifespan 中调用）"""
+        """启动消费者循环（在 FastAPI lifespan 中调用）
+
+        单实例约束（2026-09-10 并发加固 P0-B）：拿不到进程级锁时不启动消费者，
+        仅作为 API 进程存在。这样 --reload 重启窗口 / 误起第二实例 / 测试触发
+        lifespan 都不会出现两个消费者同时扫 pending 的情况。
+        """
+        if self._task is not None:
+            return
+        if not _acquire_instance_lock():
+            self._leader = False
+            logger.warning(
+                "⚠️ 未取得队列单实例锁：本进程只提供 API（可入队/查询），不消费队列"
+            )
+            return
+        self._leader = True
         await self.recover()
         self._stop = False
         self._task = asyncio.create_task(self._worker_loop())
-        logger.info("生成队列消费者已启动")
+        logger.info("生成队列消费者已启动（本进程 pid=%s 持有消费权）", os.getpid())
 
     async def stop(self):
         """停止消费者循环"""
@@ -353,6 +481,10 @@ class QueueService:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            self._task = None
+        if self._leader:
+            _release_instance_lock()
+            self._leader = False
         logger.info("生成队列消费者已停止")
 
     # ------------------------------------------------------------------ #
@@ -361,6 +493,7 @@ class QueueService:
     async def _worker_loop(self):
         while not self._stop:
             try:
+                _touch_instance_lock()  # 心跳：僵死超过阈值后锁可被其他实例回收
                 claimed = await self._claim_and_dispatch()
             except Exception as e:
                 logger.error(f"队列消费者异常: {e}")
