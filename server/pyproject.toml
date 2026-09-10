@@ -75,6 +75,14 @@ cosyvoice = [
     "openai-whisper>=20250625",
 ]
 
+# ---- 可选：Demucs 人声分离（voice preset 参考音频去 BGM，按需运行）----
+# 启用方式：uv sync --extra cosyvoice --extra denoise
+# 背景（2026-09-10 任务005）：ref_hongyun.wav 自带背景配乐，CosyVoice2 zero-shot
+# 会把 BGM 克隆进合成结果（听感"人声+杂音"）。htdemucs 分离出纯人声替换 ref_wav。
+denoise = [
+    "demucs>=4.0",
+]
+
 # ---- uv 构建/索引配置 ----
 [build-system]
 requires = ["setuptools>=61"]
