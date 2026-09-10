@@ -49,6 +49,10 @@ outputs/
 # 截图脚本的临时报告（docs/images 下只收 .png 截图，不收报告）
 docs/images/shots_report.txt
 
+# 开发过程辅助文档（不进开源库，本地保留；docs/images 截图除外）
+docs/PIPELINE.md
+docs/design/
+
 # 后端虚拟环境 / 模型权重 / 产物（体积大，不纳入版本控制）
 .venv/
 server/.venv/
