@@ -35,7 +35,7 @@
         <span class="review-hint">流水线已完成，请确认产物后再发布</span>
       </div>
       <div class="review-actions">
-        <button class="btn btn-success" @click="approveTask">✅ 通过并发布</button>
+        <button class="btn btn-success" @click="approveTask">✅ 通过</button>
         <button class="btn btn-danger" @click="showRejectInput = !showRejectInput">✗ 驳回</button>
         <button class="btn btn-secondary" :disabled="regenSubmitting" @click="regenerateTask">🔄 重新生成</button>
       </div>
