@@ -1461,6 +1461,31 @@ class PipelineEngine:
         return timeline, t
 
     @staticmethod
+    def _audio_acrossfade_filter(n: int, trans: float) -> str:
+        """构造音频 acrossfade 链（与视频 xfade 同步压缩时长）。
+
+        n 个输入音频 [0:a]..[n-1:a]，逐段 acrossfade=d=trans：
+        相邻段交叉淡入淡出 trans 秒，最终输出 [aout]。独立中间标签
+        aa1..aa{n-1} 避免在本机合并滤镜图中丢失输出标签（已实测跑通）。
+
+        trans<=0 或 n<=1 时退化为 concat（无重叠，纯顺序）。
+        总时长 = Σ各段 - (n-1)*trans，与 _transition_timeline 的画面基准一致。
+        """
+        if n <= 1:
+            return "[0:a]"
+        if trans <= 0:
+            return f"{''.join(f'[{k}:a]' for k in range(n))}concat=n={n}:v=0:a=1[aout]"
+        parts = []
+        prev_a = "[0:a]"
+        for k in range(1, n):
+            out_a = f"aa{k}"
+            # 最后一段映射到 [aout]，供 -map
+            target = "[aout]" if k == n - 1 else f"[{out_a}]"
+            parts.append(f"{prev_a}[{k}:a]acrossfade=d={trans:.2f}{target}")
+            prev_a = target
+        return ";".join(parts)
+
+    @staticmethod
     def _transition_timeline(durs: list, texts: list, trans: float) -> tuple:
         """有转场：第 k 段起点 = Σ前(k-1)段时长 - k·trans（交叉淡入淡出重叠），
         总时长 = Σ时长 - (n-1)·trans。"""
@@ -1517,14 +1542,16 @@ class PipelineEngine:
             prev_v = f"[{out_v}]"
             out_v = f"v{k+1}"
             acc_end = acc_end - trans + durs[k]
-        # 音频 gapless 拼接（concat 滤镜，稳健且不会在合并图中缺失输出标签）
-        ainputs = "".join(f"[{k}:a]" for k in range(n))
-        afc = f"{ainputs}concat=n={n}:v=0:a=1[aout]"
+        # 音频跨段交叉淡入淡出（acrossfade 链），与视频 xfade 共用同一 trans 时长
+        # 同步压缩：使音/画/字幕统一落在"重叠基准"上。旧版用 concat 顺序拼接——音频
+        # 不被转场压缩，整条音轨相对字幕/画面后漂 0.4s/段（7 段末段漂 2.4s），即用户
+        # 听感的"声音晚于字幕"。acrossfade 逐段独立标签，在本机合并滤镜图中已实测跑通。
+        afc = self._audio_acrossfade_filter(n, trans)
         fc = ";".join(vparts) + ";" + afc
         inputs = []
         for f in seg_files:
             inputs += ["-i", str(f).replace(chr(92), "/")]
-        # -map 视频用最后一次 xfade 实际产出标签 v{n-1}；音频用 concat 的 [aout]
+        # -map 视频用最后一次 xfade 实际产出标签 v{n-1}；音频用 acrossfade 链末端的 [aout]
         cmd = [ff, "-y", *inputs, "-filter_complex", fc,
                "-map", f"[v{n-1}]", "-map", "[aout]",
                "-c:v", "libx264", "-crf", "23", "-preset", "veryfast",
