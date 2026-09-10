@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <!-- 三段暮色纵向渐变：深靛蓝 → 黛青 → 琥珀金 -->
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#101428"/>
+      <stop offset="42%" stop-color="#283846"/>
+      <stop offset="72%" stop-color="#6a5636"/>
+      <stop offset="100%" stop-color="#c49642"/>
+    </linearGradient>
+    <!-- 圆月暖光（径向） -->
+    <radialGradient id="moon" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#fff6e0" stop-opacity="1"/>
+      <stop offset="55%" stop-color="#f4e8c0" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#f4e8c0" stop-opacity="0"/>
+    </radialGradient>
+    <!-- 金色标题渐变 -->
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#ffe9ad"/>
+      <stop offset="45%" stop-color="#f0ca6e"/>
+      <stop offset="100%" stop-color="#c99a44"/>
+    </linearGradient>
+    <!-- 暮霭横向光带（模拟雾，压住远山） -->
+    <linearGradient id="mist" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#283846" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#7a5f34" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#283846" stop-opacity="0"/>
+    </linearGradient>
+    <!-- 远山淡雾色 -->
+    <linearGradient id="far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#5a6f82"/>
+      <stop offset="100%" stop-color="#3a4a5c"/>
+    </linearGradient>
+    <linearGradient id="mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#33455a"/>
+      <stop offset="100%" stop-color="#1e2a38"/>
+    </linearGradient>
+    <linearGradient id="near" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#1a2230"/>
+      <stop offset="100%" stop-color="#0d1118"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 背景天空 -->
+  <rect width="1080" height="1080" fill="url(#sky)"/>
+
+  <!-- 圆月（右上，暖光晕） -->
+  <circle cx="792" cy="248" r="150" fill="url(#moon)"/>
+  <circle cx="792" cy="248" r="86" fill="#fbf2d6"/>
+  <circle cx="772" cy="230" r="20" fill="#efe0b4" opacity="0.5"/>
+  <circle cx="812" cy="268" r="14" fill="#efe0b4" opacity="0.4"/>
+
+  <!-- 层叠远山：远(淡)→中→近(暗) -->
+  <path d="M0,772 L130,706 L270,742 L410,684 L560,724 L720,672 L900,714 L1080,690 L1080,1080 L0,1080 Z" fill="url(#far)" opacity="0.75"/>
+  <path d="M0,848 L150,792 L330,834 L490,782 L660,824 L840,792 L1080,834 L1080,1080 L0,1080 Z" fill="url(#mid)" opacity="0.9"/>
+  <!-- 暮霭光带压住山脊 -->
+  <rect x="0" y="630" width="1080" height="150" fill="url(#mist)"/>
+  <path d="M0,948 L180,884 L380,934 L560,882 L760,934 L1080,892 L1080,1080 L0,1080 Z" fill="url(#near)"/>
+
+  <!-- 点缀远山上一两座小亭/竹影（极简） -->
+  <g opacity="0.6" fill="#0d1118">
+    <path d="M300,930 L318,906 L336,930 Z"/>
+    <rect x="308" y="930" width="20" height="6"/>
+    <path d="M760,930 L778,906 L796,930 Z"/>
+    <rect x="768" y="930" width="20" height="6"/>
+  </g>
+
+  <!-- 主标题：金色书法体"古诗词"（系统微软雅黑粗体，resvg 系统字体，中文不出乱码） -->
+  <g font-family="Microsoft YaHei, SimHei, sans-serif" font-weight="900" text-anchor="middle">
+    <text x="544" y="566" font-size="236" fill="#0b0d16" opacity="0.55">古诗词</text>
+    <text x="540" y="560" font-size="236" fill="url(#gold)">古诗词</text>
+  </g>
+
+  <!-- 副标题 + 两侧装饰短线 -->
+  <g font-family="Microsoft YaHei, SimHei, sans-serif" text-anchor="middle">
+    <text x="540" y="712" font-size="54" fill="#e8e8f2" opacity="0.92" letter-spacing="10">短视频合集</text>
+  </g>
+  <rect x="330" y="700" width="120" height="3" fill="#c89b48" opacity="0.7"/>
+  <rect x="630" y="700" width="120" height="3" fill="#c89b48" opacity="0.7"/>
+
+  <!-- 底部点睛小字 -->
+  <text x="540" y="1030" font-family="Microsoft YaHei, SimHei, sans-serif" text-anchor="middle" font-size="30" fill="#d8c79a" opacity="0.85" letter-spacing="6">唐 · 宋 · 经典诗词鉴赏</text>
+
+  <!-- 右下朱红印章"诗韵"（白文） -->
+  <g>
+    <rect x="926" y="940" width="104" height="104" rx="12" fill="#b22218"/>
+    <rect x="932" y="946" width="92" height="92" rx="8" fill="none" stroke="#ffe6da" stroke-width="3" opacity="0.9"/>
+    <text x="978" y="998" font-family="Microsoft YaHei, SimHei, sans-serif" font-weight="700" text-anchor="middle" font-size="46" fill="#ffeae0">诗韵</text>
+  </g>
+</svg>
