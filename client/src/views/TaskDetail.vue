@@ -14,7 +14,6 @@
         <button class="btn btn-secondary" @click="$router.push('/tasks')">← 返回列表</button>
         <button v-if="task.status === 'done'" class="btn btn-secondary" @click="openPublish">📤 发布</button>
         <button v-if="task.status === 'failed'" class="btn btn-primary" :disabled="regenSubmitting" @click="regenerateTask">🔄 重新生成</button>
-        <button class="btn btn-ghost" :disabled="!task.video_url" @click="exportVideo">📥 导出视频</button>
       </div>
     </div>
 
@@ -219,8 +218,11 @@
       <div class="video-grid">
         <div class="video-card" v-for="g in videoGroupsByRatio" :key="g.ratio">
           <div class="video-card-head">
-            <span class="plat-badge">{{ g.label }}</span>
-            <span class="plat-ratio">{{ g.ratio }}</span>
+            <div class="video-card-title">
+              <span class="plat-badge">{{ g.label }}</span>
+              <span class="plat-ratio">{{ g.ratio }}</span>
+            </div>
+            <button class="btn-text" @click="exportVideo(g.url)" :title="`下载 ${g.label} ${g.ratio} 成片`">📥 下载</button>
           </div>
           <video :src="g.url" controls style="width:100%;max-height:340px;background:#000;"></video>
         </div>
@@ -442,7 +444,9 @@ const videoGroupsByRatio = computed(() => {
 })
 
 // ====== 操作 ======
-const exportVideo = () => task.value.video_url ? window.open(withOutputToken(task.value.video_url)) : alert('视频尚未生成')
+// 下载入口已迁到每个视频卡片（按画幅分组各自导出，2026-09-10 Q2）；
+// 这里收 url 参数——各卡导自己那张成片的带 token URL，页头统一入口已删。
+const exportVideo = (url) => url ? window.open(url) : alert('视频尚未生成')
 const previewImage = (url) => window.open(url, '_blank')
 
 // 审核相关
@@ -718,6 +722,7 @@ onUnmounted(() => cleanup())
 .video-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .video-card { border: 1px solid var(--color-border-light); border-radius: var(--radius-md); overflow: hidden; background: var(--color-bg); }
 .video-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--color-border-light); }
+.video-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .plat-badge { font-size: 13px; font-weight: 600; }
 .plat-ratio { font-size: 11px; background: #e6f7ff; color: #096dd9; padding: 1px 8px; border-radius: var(--radius-full); font-weight: 600; }
 
