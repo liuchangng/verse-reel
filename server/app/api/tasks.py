@@ -18,6 +18,7 @@ from app.services.queue import STAGE_ORDER, queue_service
 from app.models.poem import Poem
 from app.services.pipeline import pipeline_engine
 from app.services.publisher import publisher_service
+from app.services.task_state import patch_task
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ async def create_task(
     # run_pipeline，完全绕过队列——无执行记录（进度弹窗"暂无执行记录"）、
     # 不受任务间串行约束、后端重启即死且无从恢复（僵尸 processing）。
     # 与 regenerate/batch 同一架构：全部走 generation_jobs 队列。
-    count = await queue_service.enqueue_task(task_id=task.id)
+    count = await queue_service.enqueue_task(task_id=task.id, source="create_task")
 
     return {
         "id": task.id,
@@ -521,19 +522,29 @@ async def review_task(
     if action not in ("approve", "reject"):
         raise HTTPException(status_code=400, detail="action 必须是 approve 或 reject")
 
+    now = datetime.now()
     if action == "approve":
-        task.status = "done"
-        task.current_stage = "done"
-        task.progress = 100
-        task.review_status = "approved"
-        task.completed_at = datetime.now()
+        fields = dict(
+            status="done", current_stage="done", progress=100,
+            review_status="approved", completed_at=now, reviewed_at=now,
+        )
     else:
-        task.status = "failed"
-        task.review_status = "rejected"
-        task.review_comment = comment or "未填写审核意见"
+        fields = dict(
+            status="failed", review_status="rejected",
+            review_comment=comment or "未填写审核意见", reviewed_at=now,
+        )
 
-    task.reviewed_at = datetime.now()
-    await db.commit()
+    # 原子 CAS（2026-09-10 并发加固 P1-D）：上面的 `task.status != pending_review`
+    # 校验与这里的写入之间仍存在窗口——双重提交、或队列终态判定同时改写 status，
+    # 都会让一方的修改被另一方静默覆盖。改由数据库按 status 条件执行 UPDATE，
+    # 条件不满足即说明状态已被他人改变，返回 409 让前端刷新而不是悄悄丢改动。
+    if not await patch_task(
+        db, task_id, only_if={"status": "pending_review"}, **fields
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="任务状态已变更（可能已被审核或重新生成），请刷新后重试",
+        )
     await db.refresh(task)
     logger.info(f"任务 {task_id} 审核: {action}, review_status={task.review_status}")
 
@@ -550,6 +561,7 @@ async def review_task(
 async def regenerate_task(
     task_id: int,
     stage: str = Query("script", description="重跑阶段: script/image/video/all"),
+    force: bool = Query(False, description="覆盖在途 Job：任务仍有 pending/running 阶段时默认拒绝（409）"),
     db: AsyncSession = Depends(get_db),
 ):
     """重新生成任务（Q3A）
@@ -572,6 +584,26 @@ async def regenerate_task(
     stage_alias = {"storyboard": "image", "spot": "script"}
     stage = stage_alias.get(stage, stage)
 
+    # 在途互斥（2026-09-09 事故）：重新入队会删除本任务所有 pending/running Job
+    # 并清空对应产物 —— 任务正在跑时"又重新生成一遍"会把已跑完的分镜/配音/视频
+    # 悄悄丢掉重来，用户看到的就是"我没点重生成，图片怎么又变了一批"。
+    # 规则：默认拒绝（409 并列出在途阶段），前端二次确认后带 force=true 才放行。
+    if not force:
+        inflight = (await db.execute(
+            select(Job).where(Job.task_id == task_id, Job.status.in_(("pending", "running")))
+        )).scalars().all()
+        if inflight:
+            detail = "、".join(f"{j.stage}({j.status})" for j in inflight)
+            logger.warning(
+                "重新生成被拒：task=%s 仍有在途 Job stage=%s 在途=[%s]",
+                task_id, stage, ",".join(f"#{j.id}:{j.stage}:{j.status}" for j in inflight),
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=f"任务正在执行中（{detail}），重新生成会丢弃在途进度与已生成产物；"
+                       f"确认请带 force=true 重试",
+            )
+
     if stage == "all":
         stages = list(STAGE_ORDER)
         clear_outputs = True
@@ -587,16 +619,24 @@ async def regenerate_task(
             detail=f"未知阶段: {stage}（合法: script/character/image/tts/video/subtitle/all）",
         )
 
-    # 立即翻 status=processing 前端不用等队列 claim 才看到状态变化
-    task.status = "processing"
-    task.progress = 0
-    task.review_status = "pending"
-    task.error_message = None
-    task.current_stage = stage
-    await db.commit()
+    # 立即翻 status=processing 前端不用等队列 claim 才看到状态变化。
+    # 原子 CAS（2026-09-10 并发加固 P1-D）：以「读到的 status」为条件写入，
+    # 期间若被审核/终态判定改写则更新不命中 → 409，避免两个写者互相覆盖。
+    if not await patch_task(
+        db, task_id,
+        only_if={"status": task.status},
+        status="processing", progress=0, review_status="pending",
+        error_message=None, current_stage=stage,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="任务状态已被其他操作改变，请刷新后重试",
+        )
+    await db.refresh(task)
 
     count = await queue_service.enqueue_task(
         task_id=task_id, stages=stages, clear_outputs=clear_outputs,
+        source="regenerate",
     )
 
     return {
@@ -671,6 +711,7 @@ async def batch_generate(
             t.current_stage = "script" if stage == "all" else stage
             count = await queue_service.enqueue_task(
                 task_id=t.id, stages=stages_arg, clear_outputs=req.clear_outputs,
+                source="batch_generate",
             )
             total_jobs += count
             results.append({"task_id": t.id, "enqueued_count": count, "ok": True})
