@@ -151,6 +151,16 @@
             </div>
             <div class="form-hint">可多选；已选 {{ selectedPublishPlatforms.length }} 个平台，将分别为每个平台生成对应尺寸的视频。</div>
           </div>
+          <div class="form-group">
+            <label>选择文案风格：</label>
+            <select v-model="selectedStyle" class="style-select">
+              <option value="">自动推荐（按热点主题推断，无热点用默认风格）</option>
+              <option v-for="s in styleOptions" :key="s.name" :value="s.name">
+                {{ s.name }} - {{ s.description }}
+              </option>
+            </select>
+            <div class="form-hint">风格决定文案语调、画面提示词与字幕样式；不指定则自动推荐。</div>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" @click="showCreateModal = false">取消</button>
@@ -183,6 +193,9 @@ const expandedId = ref(null)
 const showCreateModal = ref(false)
 const selectedPoem = ref(null)
 const selectedPublishPlatforms = ref(['douyin', 'xiaohongshu', 'kuaishou', 'bilibili', 'youtube'])
+// 文案风格：'' = 自动推荐（后端按热点主题推断；无热点回退默认风格）
+const selectedStyle = ref('')
+const styleOptions = ref([])
 
 // 朝代和体裁选项（从API动态获取，这里提供默认值）
 const dynastyOptions = ['唐', '宋', '元', '明', '清', '先秦', '汉', '魏晋', '南北朝', '隋', '辽', '金', '遠古', '未知']
@@ -262,7 +275,12 @@ const confirmCreateTask = async () => {
     return
   }
   try {
-    await api.createTask(selectedPoem.value.id, selectedPublishPlatforms.value)
+    await api.createTask(
+      selectedPoem.value.id,
+      selectedPublishPlatforms.value,
+      null,
+      selectedStyle.value || null
+    )
     showCreateModal.value = false
     router.push('/tasks')
   } catch (error) {
@@ -271,9 +289,20 @@ const confirmCreateTask = async () => {
   }
 }
 
+// 加载可选风格列表
+const loadStyles = async () => {
+  try {
+    const data = await api.getStyles()
+    styleOptions.value = data.items || []
+  } catch (error) {
+    console.error('加载风格列表失败', error)
+  }
+}
+
 // 初始化
 onMounted(() => {
   loadPoems()
+  loadStyles()
 })
 </script>
 
@@ -338,6 +367,7 @@ onMounted(() => {
 .pagination { display: flex; align-items: center; justify-content: center; gap: var(--spacing-3); margin-top: var(--spacing-5); padding: var(--spacing-3) 0; }
 .page-info { font-size: 13px; color: var(--color-text-muted); min-width: 120px; text-align: center; }
 .page-size-select { padding: var(--spacing-1) var(--spacing-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: 13px; background: var(--color-bg-card); font-family: inherit; }
+.style-select { width: 100%; padding: var(--spacing-2) var(--spacing-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-card); color: var(--color-text); font-size: 14px; font-family: inherit; cursor: pointer; }
 
 /* 加载状态 */
 .loading-state { text-align: center; padding: 80px; color: var(--color-text-muted); }

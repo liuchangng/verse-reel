@@ -123,6 +123,16 @@
             <span class="poem-title">《{{ selectedPoem?.title }}》</span>
             <span class="poem-author">- {{ selectedPoem?.author }}</span>
           </div>
+          <div class="form-group">
+            <label>选择文案风格：</label>
+            <select v-model="selectedStyle" class="style-select">
+              <option value="">自动推荐（按本条热点主题推断）</option>
+              <option v-for="s in styleOptions" :key="s.name" :value="s.name">
+                {{ s.name }} - {{ s.description }}
+              </option>
+            </select>
+            <div class="form-hint">不指定则按热点主题自动匹配风格；手动指定后以选择为准。</div>
+          </div>
           <div class="modal-tip">
             将按「设置」页中配置的默认发布平台（默认全选）发布，可在设置中调整。
           </div>
@@ -158,6 +168,9 @@ const hasLoadedOnce = ref(_cache.hotspots.length > 0)
 const showCreateModal = ref(false)
 const selectedPoem = ref(null)
 const selectedSource = ref(null)
+// 文案风格：'' = 自动推荐（后端按热点主题推断）
+const selectedStyle = ref('')
+const styleOptions = ref([])
 
 // 自动刷新定时器
 let refreshTimer = null
@@ -238,7 +251,12 @@ const confirmCreateTask = async () => {
   try {
     // 不传 platforms，由后端回退 settings.output_platforms（默认全选）
     // 热点来源随任务落库：文案阶段只注入本任务关联的热点（2026-09-09 修复）
-    const result = await api.createTask(selectedPoem.value.id, [], selectedSource.value)
+    const result = await api.createTask(
+      selectedPoem.value.id,
+      [],
+      selectedSource.value,
+      selectedStyle.value || null
+    )
     showCreateModal.value = false
 
     // 跳转到任务管理页
@@ -267,8 +285,19 @@ const stopAutoRefresh = () => {
   }
 }
 
+// 加载可选风格列表
+const loadStyles = async () => {
+  try {
+    const data = await api.getStyles()
+    styleOptions.value = data.items || []
+  } catch (error) {
+    console.error('加载风格列表失败', error)
+  }
+}
+
 // 初始化
 onMounted(() => {
+  loadStyles()
   // 有缓存 → 秒显，后台静默刷新
   if (_cache.hotspots.length > 0) {
     hasLoadedOnce.value = true
@@ -670,6 +699,37 @@ onUnmounted(() => {
   border-radius: var(--radius-md);
   border-left: 3px solid var(--color-primary);
   line-height: 1.6;
+}
+
+.form-group {
+  margin-bottom: var(--spacing-4);
+}
+
+.form-group label {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: var(--spacing-2);
+  color: var(--color-text);
+}
+
+.style-select {
+  width: 100%;
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-card);
+  color: var(--color-text);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.form-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: var(--spacing-2);
+  line-height: 1.5;
 }
 
 .modal-footer {

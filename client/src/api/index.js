@@ -101,15 +101,25 @@ export const getTaskJobs = async (id) => {
   return response
 }
 
-export const createTask = async (poemId, platforms = ['douyin'], source = null) => {
+// 可选文案风格列表（创建任务弹窗下拉用）
+export const getStyles = async () => {
+  const response = await apiClient.get('/tasks/styles')
+  return response
+}
+
+export const createTask = async (poemId, platforms = ['douyin'], source = null, style = null) => {
   // platforms: 数组，例 ['douyin','xiaohongshu','kuaishou','bilibili']
   // 后端 Query(list[str]) 接收；为空数组时回退全局 settings.output_platforms
   // 用 indices:false 序列化为 platforms=a&platforms=b（FastAPI 方能解析为列表）
   // source: 热点来源 { title, keywords }（热点页创建时传入；诗词库/Top榜创建为 null
   // → 任务不关联热点，文案阶段不注入热词）
+  // style: 文案风格名（见 getStyles）；null/空 = 自动推荐（由后端按热点主题推断）
   const params = { poem_id: poemId }
   if (Array.isArray(platforms) && platforms.length > 0) {
     params.platforms = platforms
+  }
+  if (style) {
+    params.style = style
   }
   if (source?.title) {
     params.source_hotspot_title = source.title
@@ -278,4 +288,5 @@ export default {
   getSettings,
   updateSettings,
   getTaskJobs,
+  getStyles,
 }
