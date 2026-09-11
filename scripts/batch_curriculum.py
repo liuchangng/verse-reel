@@ -14,6 +14,8 @@
 
   --dry-run   只打印要建的任务，不实际调 API
   --resume    跳过 source_hotspot_title 已存在的篇目（默认就跳过，--resume 显式声明）
+  --style X   指定文案风格（情感治愈/职场共鸣/历史解读/人生感悟）；
+              缺省 = 自动：课标篇目默认「历史解读」，可被本参数覆盖
 """
 import argparse
 import asyncio
@@ -77,11 +79,16 @@ async def run(args: argparse.Namespace) -> None:
             if args.dry_run:
                 print(f"  [dry]  #{it['no']} {it['title']} → poem_id={it['poem_id']} platforms={PLATFORMS}")
                 continue
-            r = await client.post(
-                "/api/tasks/",
-                params={"poem_id": it["poem_id"], "platform": PLATFORMS[0], "platforms": ",".join(PLATFORMS), "source_hotspot_title": tag},
-                headers=headers,
-            )
+            params = {
+                "poem_id": it["poem_id"],
+                "platform": PLATFORMS[0],
+                "platforms": ",".join(PLATFORMS),
+                "source_hotspot_title": tag,
+            }
+            # 显式风格优先（--style）；不传则由后端按 curriculum 默认「历史解读」
+            if args.style:
+                params["style"] = args.style
+            r = await client.post("/api/tasks/", params=params, headers=headers)
             if r.status_code == 200:
                 created += 1
                 print(f"  [ok]   #{it['no']} {it['title']} → task_id={r.json().get('id')}")
@@ -102,5 +109,6 @@ if __name__ == "__main__":
     ap.add_argument("--dry-run", action="store_true", help="只打印不建任务")
     ap.add_argument("--resume", action="store_true", help="显式断点续跑（默认即跳过已建）")
     ap.add_argument("--token", default="", help="APP_TOKEN；缺省读 server/.env 的 APP_TOKEN")
+    ap.add_argument("--style", default="", help="文案风格（情感治愈/职场共鸣/历史解读/人生感悟）；缺省=自动（课标默认历史解读）")
     args = ap.parse_args()
     asyncio.run(run(args))
