@@ -159,7 +159,11 @@ def _release_instance_lock() -> None:
 
 
 # 标准阶段顺序（用于依赖判断与最终态判定）
-STAGE_ORDER = ["script", "character", "image", "tts", "video", "subtitle"]
+# publish_copy：各平台发布文案（标题/描述/话题）——本质是 LLM 文本，属 Q-TEXT；
+# 仅依赖 script，可与 image/tts/subtitle 并行。之所以纳入流水线，是因为旧版把它
+# 放在"打开详情页时同步调 LLM"的交互路径上，与批量共用全局 text 限流器，
+# 批量跑满时详情页被饿死卡死（本次根因修复）。
+STAGE_ORDER = ["script", "character", "image", "tts", "video", "subtitle", "publish_copy"]
 
 # 每个阶段的前置依赖（必须全部 done 才能认领）
 STAGE_PREREQS = {
@@ -169,6 +173,7 @@ STAGE_PREREQS = {
     "tts": {"script"},
     "video": {"image"},
     "subtitle": {"video", "tts"},
+    "publish_copy": {"script"},
 }
 
 # 资源类映射：阶段 → 底层资源类型。用于
@@ -176,6 +181,7 @@ STAGE_PREREQS = {
 #   2) 分资源超时（各资源类真实耗时量级不同，见 settings.job_timeout_*）。
 RESOURCE_CLASS: dict[str, str] = {
     "script": "text",
+    "publish_copy": "text",
     "character": "image",
     "image": "image",
     "tts": "tts",
@@ -211,8 +217,10 @@ def _enabled_stages() -> list[str]:
 
 
 # 消费优先级：快速阶段高、视频低（方式二批处理的核心）
+# publish_copy 置 58：紧随 script 之后生成，保证详情页打开时文案已就绪。
 STAGE_PRIORITY = {
     "script": 60,
+    "publish_copy": 58,
     "character": 55,
     "image": 50,
     "tts": 45,
@@ -230,6 +238,7 @@ STAGE_OUTPUTS = {
     "tts": ["audio_url"],
     "video": ["video_url", "video_duration"],
     "subtitle": ["subtitle_url"],
+    "publish_copy": ["publish_copies"],
 }
 
 
@@ -297,12 +306,15 @@ def _task_produced(task: Task) -> dict[str, bool]:
         "tts": _nonempty(getattr(task, "audio_url", None)),
         "video": _nonempty(getattr(task, "video_url", None)),
         "subtitle": _nonempty(getattr(task, "subtitle_url", None)),
+        # publish_copy: 各平台发布文案 JSON（空串/[]/{}/null 视为未生成）
+        "publish_copy": _nonempty(getattr(task, "publish_copies", None)),
     }
 
 # 各阶段并发数取自系统设置（不同生成类型不同并发）
 def _stage_concurrency(stage: str) -> int:
     mapping = {
         "script": settings.text_concurrency,
+        "publish_copy": settings.text_concurrency,  # 发布文案走文本接口，共用文本并发桶
         "character": settings.image_concurrency,   # 定妆照走图片接口，共用图片并发桶
         "image": settings.image_concurrency,
         "video": settings.video_concurrency,        # 默认 1（agnes 视频 1 次/分钟）

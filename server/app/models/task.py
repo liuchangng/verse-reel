@@ -27,6 +27,11 @@ class Task(Base):
     platforms = Column(Text, nullable=True, comment="本任务选中的发布平台列表(JSON): douyin/xiaohongshu/kuaishou/bilibili")
     # 多平台合成产物 URL 映射(JSON 字符串)：{平台: 视频URL}，供发布阶段选择
     platform_outputs = Column(Text, nullable=True, comment="多平台视频URL映射(JSON)")
+    # 各平台发布文案（JSON）：{平台: {title, description, tags, generated}}。
+    # 由 publish_copy 管线阶段（依赖 script，走 Q-TEXT 批量泳道）落库；详情页直接
+    # 读此字段展示，不再在打开详情时同步调 LLM（根因修复：旧版交互式 LLM 与批量
+    # 共用全局 text 限流器，批量跑满时详情页被饿死/卡死）。
+    publish_copies = Column(Text, nullable=True, comment="各平台发布文案(JSON)")
     script = Column(Text, comment="生成的文案脚本")
     script_score = Column(Integer, comment="文案评分")
     storyboard = Column(Text, comment="分镜JSON数据")

@@ -432,6 +432,32 @@ class PipelineEngine:
                 task.platform_outputs = json.dumps(platform_urls, ensure_ascii=False)
             await db.commit()
 
+        elif stage == "publish_copy":
+            # 各平台发布文案（标题/描述/话题）。本质是 LLM 文本，走 Q-TEXT。
+            # 旧版在"打开详情页时"同步调 LLM（api/publish-content），与批量共用全局
+            # text 限流器 → 批量跑满时详情页被饿死卡死。改为流水线内生成并落库，
+            # 详情页只读 DB（见 api/tasks.get_task 与 publish-content）。
+            if _have("publish_copies") and not force:
+                logger.info(f"task{task_id} publish_copy 已存在，跳过 stage")
+                return
+            if not _have("script"):
+                raise RuntimeError("publish_copy 缺少前置 script")
+            plats = self._task_platforms(task)
+            copies = await publisher_service.generate_platform_copy(
+                task_id=task_id,
+                script=task.script or "",
+                poem_title=poem.title if poem else "",
+                author=(poem.author if poem else "") or "",
+                dynasty=(poem.dynasty if poem else "") or "",
+                platforms=plats,
+            )
+            task.publish_copies = json.dumps(copies, ensure_ascii=False)
+            await db.commit()
+            logger.info(
+                f"task{task_id} publish_copy 阶段完成: {len(copies)} 个平台 "
+                f"({','.join(copies.keys())})"
+            )
+
         else:
             raise ValueError(f"未知阶段: {stage}")
 

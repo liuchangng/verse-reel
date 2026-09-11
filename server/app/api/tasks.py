@@ -280,6 +280,15 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
         except (json.JSONDecodeError, TypeError):
             image_urls_list = []
 
+    # 解析 publish_copies JSON（各平台发布文案，publish_copy 阶段产物）。
+    # 详情页直接读此字段展示，不再同步调 LLM（根因修复，见 queue/pipeline）。
+    publish_copies = {}
+    if task.publish_copies:
+        try:
+            publish_copies = json.loads(task.publish_copies)
+        except (json.JSONDecodeError, TypeError):
+            publish_copies = {}
+
     # 状态推算：基于实际数据存在性，不依赖 current_stage（避免结束后 stage 回退导致误判）
     _script_done = bool(task.script and task.script_score)
     _image_done = bool(image_urls_list) or (task.image_score is not None and task.image_score > 0)
@@ -316,6 +325,8 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
         # 多平台成片 URL 映射（JSON 字符串）：前端视频预览按平台数量渲染多个成片。
         # 缺省/单平台时为空，前端回退到单个 video_url。
         "platform_outputs": task.platform_outputs,
+        # 各平台发布文案（publish_copy 阶段产物，详情页直接展示，不触发 LLM）
+        "publish_copies": publish_copies,
         "storyboard": storyboard,
         "error_message": task.error_message,
         # 审核相关（Q2A）
@@ -519,30 +530,58 @@ async def publish_task(
 @router.post("/{task_id}/publish-content")
 async def generate_task_publish_content(
     task_id: int,
-    platforms: list[str] = Query(["douyin", "xiaohongshu", "kuaishou"], description="要生成文案的平台列表"),
+    platforms: list[str] = Query(None, description="要查看文案的平台列表；为空=返回 DB 中全部"),
     db: AsyncSession = Depends(get_db),
 ):
-    """按需生成各平台的发布文案（标题/描述/话题），供详情页视频卡片下方展示。
+    """读取各平台发布文案（标题/描述/话题），供详情页视频卡片下方展示。
 
-    设计（2026-09-10 Q3）：前端"查看时按需生成"——不进流水线、不建 DB 字段，
-    用 LLM 按各平台字数/话题规范产出一组吸睛文案，进程内按 (task_id, script 哈希,
-    platforms) 缓存，同文案重复进详情页不重复调 LLM。LLM 失败的平台回退规则版。
+    根因修复（2026-09-12）：旧版在"打开详情页时"同步调 LLM 生成文案，与批量生成
+    共用全局 text 限流器 —— 批量跑满（18 RPM）时该请求被队头阻塞在队尾（可达 60s+
+    甚至永久等待），表现为"任务跑完了却打不开详情"。
+
+    现改为：文案由流水线 ``publish_copy`` 阶段生成并落库（``Task.publish_copies``），
+    本接口**只读 DB、不触发 LLM**，因此永不阻塞。DB 缺失时返回规则版兜底
+    （``generated=False``），如需 LLM 文案可对任务触发 ``stage=publish_copy`` 重生成。
     """
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    # 诗词元信息（作者/朝代）增强文案相关性；缺失不阻断（LLM 仍可用标题+脚本）
-    poem = await db.get(Poem, task.poem_id)
-    copy = await publisher_service.generate_platform_copy(
-        task_id=task_id,
-        script=task.script or "",
-        poem_title=(poem.title if poem else "") or "",
-        author=(poem.author if poem else "") or "",
-        dynasty=(poem.dynasty if poem else "") or "",
-        platforms=platforms,
-    )
-    return {"task_id": task_id, "content": copy}
+    stored: dict = {}
+    if task.publish_copies:
+        try:
+            stored = json.loads(task.publish_copies)
+        except (json.JSONDecodeError, TypeError):
+            stored = {}
+
+    want = [p for p in (platforms or []) if p] or list(stored.keys())
+    if not want:
+        # DB 空：按请求平台（或默认平台）给规则版兜底，绝不调 LLM、绝不阻塞
+        want = [p for p in (platforms or []) if p] or ["douyin", "xiaohongshu", "kuaishou"]
+        poem = await db.get(Poem, task.poem_id)
+        content = {}
+        for p in want:
+            rule = await publisher_service.generate_publish_content(
+                script=task.script or "",
+                poem_title=(poem.title if poem else "") or "",
+                platform=p,
+            )
+            content[p] = {**rule, "generated": False}
+        return {"task_id": task_id, "content": content, "source": "rule_fallback"}
+
+    content = {p: stored[p] for p in want if p in stored}
+    # 请求了 DB 里没有的平台：补规则版兜底（同样不调 LLM）
+    missing = [p for p in want if p not in stored]
+    if missing:
+        poem = await db.get(Poem, task.poem_id)
+        for p in missing:
+            rule = await publisher_service.generate_publish_content(
+                script=task.script or "",
+                poem_title=(poem.title if poem else "") or "",
+                platform=p,
+            )
+            content[p] = {**rule, "generated": False}
+    return {"task_id": task_id, "content": content, "source": "db"}
 
 
 @router.post("/{task_id}/review")
