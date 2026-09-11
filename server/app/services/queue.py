@@ -504,32 +504,28 @@ class QueueService:
     async def _claim_and_dispatch(self) -> int:
         """扫描待办 Job，认领一个可执行的（依赖满足 + 阶段并发未满），派发执行。
 
-        任务间串行（用户定夺 2026-09-09）：一次只推进一个任务——
-        有在跑的 Job 时只认领该任务的后续 Job；空闲时按
-        priority desc, created_at asc 选出下一个要跑的任务。
-        资源有限（RPM 限流/视频 1 次/分钟），跨任务并行只会互相抢配额、日志穿插。
+        严格任务间串行（一个任务必须整体跑完才轮到下一个）：
+        - 有 running Job → 只推进该任务的后续阶段，绝不跨任务并发；
+        - 无 running Job → 在所有有 pending Job 的任务里，按 task_id 升序
+          取第一个（先创建的先执行）；失败的任务排到最后。
+        同任务内不同阶段仍受各阶段并发桶约束（text/image 可并行，video 串行）。
         """
         async with async_session_factory() as session:
-            res = await session.execute(
-                select(Job)
-                .where(Job.status == "pending")
-                # id 兜底排序：同秒入队的 Job created_at 相同（SQLite 秒级精度），
-                # 无 id 时先后顺序不稳定
-                .order_by(Job.priority.desc(), Job.created_at.asc(), Job.id.asc())
-            )
-            candidates = res.scalars().all()
-            if not candidates:
-                return 0
+            # 有 running Job → 锁定该任务（串行约束：同一时刻只有一个任务在跑）
+            running_task = (await session.execute(
+                select(Job.task_id).where(Job.status == "running").order_by(Job.task_id.asc()).limit(1)
+            )).scalar()
 
-            # 任务间串行：锁定"当前活动任务"
-            if running_jobs := (await session.execute(
-                select(Job)
-                .where(Job.status == "running")
-                .order_by(Job.started_at.asc(), Job.id.asc())
-            )).scalars().all():
-                active_task_id = running_jobs[0].task_id
+            if running_task is not None:
+                active_task_id = running_task
             else:
-                active_task_id = candidates[0].task_id
+                # 无 running → 取 task_id 最小的有 pending Job 的任务
+                pending_task_id = (await session.execute(
+                    select(Job.task_id).where(Job.status == "pending").order_by(Job.task_id.asc()).limit(1)
+                )).scalar()
+                if pending_task_id is None:
+                    return 0  # 没有 pending Job 了
+                active_task_id = pending_task_id
 
             # 孤儿防御（2026-09-09 事故）：活动任务的 Task 记录已被删除（如用户
             # 删任务后子表 Job 未级联清理的存量数据），其 pending Job 依赖检查
@@ -552,24 +548,24 @@ class QueueService:
                     )
                 return 0
 
-            candidates = [j for j in candidates if j.task_id == active_task_id]
+            # 重新拉取 pending Job（用 active_task_id 过滤）
+            res = await session.execute(
+                select(Job)
+                .where(Job.status == "pending", Job.task_id == active_task_id)
+                .order_by(Job.priority.desc(), Job.created_at.asc(), Job.id.asc())
+            )
+            candidates = res.scalars().all()
+            if not candidates:
+                return 0
 
             for job in candidates:
                 sem = self._sems[job.stage]
                 if sem.locked():
-                    continue  # 该阶段并发已满，跳过（看其他阶段）
+                    continue
                 if not await self._deps_satisfied(session, job):
-                    # 自愈：前置产物缺失且没有在途 Job → 自动补建，避免永久阻塞
                     await self._heal_prereqs(session, job)
-                    continue  # 前置阶段未全部完成，跳过
+                    continue
 
-                # 认领：原子 CAS（2026-09-10 并发加固 P0-A）
-                #
-                # 旧写法是「先改 ORM 对象再 commit」——SELECT 与 UPDATE 之间隔着多个
-                # await 点（依赖检查、自愈补建），另一消费者（--reload 重启窗口内的旧
-                # 子进程、误起的第二个实例、TestClient 触发的 lifespan）可能在同一窗口
-                # 读到同一个 pending Job 并各自派发，导致同一阶段被跑两遍、产物互相覆盖。
-                # 改为带 status='pending' 条件的原子 UPDATE，只有抢到（rowcount==1）才派发。
                 now = datetime.now(timezone.utc)
                 claimed = await session.execute(
                     update(Job)
@@ -583,11 +579,9 @@ class QueueService:
                         job.id, job.task_id, job.stage,
                     )
                     continue
-                # 同步内存对象，避免后续误用旧值（此后不再 commit，不会二次 UPDATE）
                 job.status = "running"
                 job.started_at = now
 
-                # 拿到信号量后再派发（保证全局并发受控）
                 await sem.acquire()
                 asyncio.create_task(self._run_job(job.id, sem))
                 return 1

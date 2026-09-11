@@ -134,13 +134,15 @@ class Settings(BaseSettings):
     text_api_key: str = Field(default="")
     text_base_url: str = Field(default="https://api.agnes-ai.cn/v1")
     text_model: str = Field(default="agnes-2.5-flash")
-    text_concurrency: int = Field(default=5)
+    # 文本并发：1 = 严格串行（一次只跑一个任务的一个阶段，避免多任务抢配额）
+    text_concurrency: int = Field(default=1)
     
     # ====== 图片模型配置 ======
     image_api_key: str = Field(default="")
     image_base_url: str = Field(default="https://api.agnes-ai.cn/v1")
     image_model: str = Field(default="agnes-image-2.1-flash")
-    image_concurrency: int = Field(default=5)
+    # 图片并发：1 = 串行
+    image_concurrency: int = Field(default=1)
     
     # ====== 视频模型配置 ======
     video_api_key: str = Field(default="")
