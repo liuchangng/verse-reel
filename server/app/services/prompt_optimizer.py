@@ -89,6 +89,29 @@ STYLE_TEMPLATES = {
     },
 }
 
+# 无热点/未显式指定时的兜底风格（保持历史行为）
+DEFAULT_STYLE = "人生感悟"
+
+
+def list_styles() -> list[dict]:
+    """返回可选风格列表（供创建任务下拉使用）。
+
+    Returns:
+        [{"name": 风格名, "description": 风格描述}, ...]
+    """
+    return [
+        {"name": tpl["name"], "description": tpl.get("description", "")}
+        for tpl in STYLE_TEMPLATES.values()
+    ]
+
+
+def normalize_style(style: str | None) -> str | None:
+    """把外部传入的风格名归一为合法值；非法/空返回 None（由调用方走自动推断）。"""
+    if not style:
+        return None
+    style = style.strip()
+    return style if style in STYLE_TEMPLATES else None
+
 
 @dataclass
 class PromptVersion:

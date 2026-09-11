@@ -22,7 +22,7 @@ from app.services.subtitle import (
     SUBTITLE_STYLES,
 )
 from app.services.hotspot import hotspot_service
-from app.services.prompt_optimizer import prompt_optimizer
+from app.services.prompt_optimizer import prompt_optimizer, normalize_style
 from app.services.character import character_service
 from app.services.publisher import publisher_service
 from app.config import settings, tier_of, resolve_task_tier, tier_script_guidelines, tier_profile
@@ -133,6 +133,7 @@ class PipelineEngine:
         platforms: list[str] | None = None,
         source_hotspot_title: str | None = None,
         source_keywords: list[str] | None = None,
+        style: str | None = None,
     ) -> Task:
         """
         创建新任务
@@ -143,6 +144,8 @@ class PipelineEngine:
             platform: 目标平台
             source_hotspot_title: 来源热点标题（热点页创建时传入；诗词库创建为空）
             source_keywords: 来源热点关键词（同上；为空 = 非热点任务，文案不注入热词）
+            style: 文案风格（创建弹窗显式选择）。传入则优先使用；
+                不传（None）=「自动推荐」，按下面优先级推断。
 
         Returns:
             创建的任务
@@ -156,10 +159,12 @@ class PipelineEngine:
         # platforms: 本任务显式选中的发布平台（来自创建弹窗多选）；为空则留空，
         # 渲染阶段回退到全局 settings.output_platforms。
         _platforms = platforms or []
-        # 热点任务：创建时即按来源热点主题定风格（旧版在文案阶段实时抓全榜推断，
-        # 时过境迁后会漂移到与任务无关的热点上）。
-        derived_style = None
-        if source_hotspot_title:
+        # 风格优先级：显式传入 > 热点主题自动推断 > curriculum 默认 > 全局默认。
+        # 前端下拉默认「自动推荐」时不传 style，落到下面的自动分支（兼容老行为）。
+        derived_style = normalize_style(style)
+        if style and derived_style is None:
+            logger.warning("传入的风格不在模板内，已忽略并回退自动推断: %r", style)
+        if source_hotspot_title and derived_style is None:
             # 课标任务（source_tag 以 "curriculum:" 开头）固定用"历史解读"风格
             # （纪录片旁白质感，适合 B站 L 档课标篇目，避免"人生感悟"鸡汤腔）
             if source_hotspot_title.startswith("curriculum:"):

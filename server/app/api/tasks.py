@@ -17,6 +17,7 @@ from app.models.job import Job
 from app.services.queue import STAGE_ORDER, queue_service
 from app.models.poem import Poem
 from app.services.pipeline import pipeline_engine
+from app.services.prompt_optimizer import list_styles, normalize_style, DEFAULT_STYLE
 from app.services.publisher import publisher_service
 from app.services.task_state import patch_task
 
@@ -119,6 +120,16 @@ async def list_tasks(
     }
 
 
+@router.get("/styles")
+async def list_task_styles():
+    """可选文案风格列表（创建任务弹窗下拉用）。
+
+    返回 [{name, description}]；前端传空/不传 style = 「自动推荐」，
+    由后端按热点主题推断，无热点时回退默认风格。
+    """
+    return {"items": list_styles(), "default": DEFAULT_STYLE}
+
+
 @router.post("/")
 async def create_task(
     poem_id: int,
@@ -126,6 +137,7 @@ async def create_task(
     platforms: list[str] = Query(None, description="本任务选中的发布平台列表(多选)；为空则回退全局 settings.output_platforms"),
     source_hotspot_title: Optional[str] = None,
     source_keywords: Optional[list[str]] = None,
+    style: Optional[str] = Query(None, description="文案风格(见 GET /api/tasks/styles)；不传=自动推荐"),
     db: AsyncSession = Depends(get_db),
 ):
     """创建新任务并自动启动流水线"""
@@ -140,11 +152,17 @@ async def create_task(
     else:
         platforms = None
 
+    # 未知风格直接 400，避免静默回退到默认风格（用户以为选中了实际没生效）
+    if style and normalize_style(style) is None:
+        valid = [s["name"] for s in list_styles()]
+        raise HTTPException(status_code=400, detail=f"未知风格: {style}；可选: {valid}")
+
     # 创建任务（热点来源随任务落库：文案阶段只注入本任务自己的热点）
     task = await pipeline_engine.create_task(
         db, poem_id, platform, platforms,
         source_hotspot_title=source_hotspot_title,
         source_keywords=source_keywords,
+        style=style,
     )
 
     # 统一生命周期（2026-09-09）：创建即入队。旧版这里用 BackgroundTasks 直跑
