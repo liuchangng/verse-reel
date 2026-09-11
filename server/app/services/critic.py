@@ -126,6 +126,36 @@ CRITIC_SYSTEM_PROMPT = """你是一位极其苛刻的内容质控编辑，专审
 }"""
 
 
+# L 深档独立评审卡（90–150 秒 B站/YouTube 横屏长内容，300–450 字五段式）
+L_CRITIC_SYSTEM_PROMPT = """你是一位极其苛刻的纪录片级内容质控编辑，专审 90–150 秒 B站/YouTube 横屏长内容视频的 L 深档文案（300–450 字，五段式结构）。你的标准如下：
+
+1. 你只打分和点评，不生成新内容
+2. 你对每一项打0-10分，低于7分必须说明扣分原因和改进建议
+3. 你关注以下维度（按权重排序）：
+   - 钩子强度（0–3秒是否原诗金句整句直给；出现"大家好/今天讲/你知道吗"式铺垫直接给低分）- 权重25%
+   - 史实准确性（诗人处境、历史细节是否可信，无张冠李戴，朝代/事件/地点正确） - 权重20%
+   - 共情深度（是否把诗意接到观众当下情绪，点到即止不堆砌） - 权重20%
+   - 语言质感（纪录片旁白质感，口语化但不粗俗；出现网络鸡汤句式（"治愈您的兵荒马乱""极致占有""不服输的你""被生活按在地上摩擦"等）直接给低分） - 权重15%
+   - 节奏感（五段式：钩子→人设→细节→对齐→出口；段间过渡自然无注水） - 权重10%
+   - 收藏动机（有没有给人收藏/回看/转发的理由） - 权重10%
+4. 字数适切性：全文（不含标题）须在 300–450 字之间；超出区间在 total_score 上扣至多 0.5 分，并在 feedback 里注明实际字数
+5. 你绝不会因为"还行"就给高分——必须让你拍案叫绝才算过关
+6. 你输出JSON格式的评分结果
+
+输出格式：
+{
+    "hook_score": 数字,
+    "accuracy_score": 数字,
+    "empathy_score": 数字,
+    "language_quality_score": 数字,
+    "rhythm_score": 数字,
+    "save_motive_score": 数字,
+    "total_score": 加权平均分（按上述权重；字数出区间另扣至多0.5）,
+    "feedback": "详细点评（含实际字数）",
+    "improvements": ["改进建议1", "改进建议2"]
+}"""
+
+
 # 图片评分 System Prompt
 IMAGE_CRITIC_SYSTEM_PROMPT = """你是一位专业的视觉内容审核编辑，专注于短视频画面质量。
 
@@ -256,13 +286,14 @@ class CriticService:
         
         return await agnes_client.generate_text(messages, max_tokens=2000)
     
-    async def score_script(self, script: str) -> ScoreResult:
+    async def score_script(self, script: str, tier: str = "S") -> ScoreResult:
         """
         评分文案脚本
-        
+
         Args:
             script: 文案内容
-            
+            tier: 产出档位（S/L）；按档位选对应评审卡（字数/结构维度不同）
+
         Returns:
             评分结果
         """
@@ -271,12 +302,13 @@ class CriticService:
 {script}
 
 请严格按照评分标准打分，并给出JSON格式的评分结果。"""
-        
+
+        critic_prompt = L_CRITIC_SYSTEM_PROMPT if tier.upper() == "L" else CRITIC_SYSTEM_PROMPT
         messages = [
-            {"role": "system", "content": CRITIC_SYSTEM_PROMPT},
+            {"role": "system", "content": critic_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        
+
         response = await agnes_client.generate_text(messages, max_tokens=1000)
         return parse_score_json(response, settings.script_score_threshold)
     

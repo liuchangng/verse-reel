@@ -160,14 +160,19 @@ class PipelineEngine:
         # 时过境迁后会漂移到与任务无关的热点上）。
         derived_style = None
         if source_hotspot_title:
-            try:
-                themes = hotspot_service.match_themes(
-                    {"source": [{"title": source_hotspot_title}]}
-                )
-                derived_style = self._select_style(themes)
-            except Exception as exc:  # 主题匹配失败不阻断创建
-                logger.warning("来源热点主题匹配失败(热点=%r): %s", source_hotspot_title, exc)
-                derived_style = None
+            # 课标任务（source_tag 以 "curriculum:" 开头）固定用"历史解读"风格
+            # （纪录片旁白质感，适合 B站 L 档课标篇目，避免"人生感悟"鸡汤腔）
+            if source_hotspot_title.startswith("curriculum:"):
+                derived_style = "历史解读"
+            else:
+                try:
+                    themes = hotspot_service.match_themes(
+                        {"source": [{"title": source_hotspot_title}]}
+                    )
+                    derived_style = self._select_style(themes)
+                except Exception as exc:  # 主题匹配失败不阻断创建
+                    logger.warning("来源热点主题匹配失败(热点=%r): %s", source_hotspot_title, exc)
+                    derived_style = None
         task = Task(
             poem_id=poem_id,
             status="pending",
@@ -687,8 +692,8 @@ class PipelineEngine:
                 keywords=keywords,
             )
             
-            # 评分
-            score_result = await critic_service.score_script(script_text)
+            # 评分（按档位选独立评审卡：S 快档三段式 80-130 字 / L 深档五段式 300-450 字）
+            score_result = await critic_service.score_script(script_text, tier=tier)
             logger.info(f"文案评分: {score_result.score}/10 - {'通过' if score_result.passed else '未通过'}")
             
             # 保存文案（评分 0-10 浮点数）
