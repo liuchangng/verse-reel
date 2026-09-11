@@ -152,6 +152,10 @@ async def create_task(
     else:
         platforms = None
 
+    # 直接函数调用（单元测试）时 style 可能是 FastAPI Query 默认对象而非 str，
+    # 先归一为 None，避免 normalize_style(Query(None)) 报 AttributeError。
+    if not isinstance(style, str):
+        style = None
     # 未知风格直接 400，避免静默回退到默认风格（用户以为选中了实际没生效）
     if style and normalize_style(style) is None:
         valid = [s["name"] for s in list_styles()]
