@@ -309,9 +309,10 @@
       "title": "渔歌子",
       "author": "张志和",
       "dynasty": "唐",
-      "matched": false,
+      "matched": true,
       "first_line": "西塞山前白鹭飞",
-      "match_note": "库内未收录，需补录入库"
+      "match_note": "渔歌子/张志和 (补录入库)",
+      "poem_id": 2035138
     },
     {
       "no": 32,
@@ -458,9 +459,10 @@
       "title": "清明",
       "author": "杜牧",
       "dynasty": "唐",
-      "matched": false,
+      "matched": true,
       "first_line": "清明时节雨纷纷",
-      "match_note": "库内未收录，需补录入库"
+      "match_note": "清明/杜牧 (补录入库)",
+      "poem_id": 2035139
     },
     {
       "no": 47,
@@ -753,26 +755,8 @@
       "first_line": "草长莺飞二月天"
     }
   ],
-  "matched_count": 73,
-  "unmatched_count": 2,
-  "unmatched": [
-    {
-      "no": 31,
-      "title": "渔歌子",
-      "author": "张志和",
-      "dynasty": "唐",
-      "status": "missing"
-    },
-    {
-      "no": 46,
-      "title": "清明",
-      "author": "杜牧",
-      "dynasty": "唐",
-      "status": "missing"
-    }
-  ],
-  "missing_poems": [
-    31,
-    46
-  ]
+  "matched_count": 75,
+  "unmatched_count": 0,
+  "unmatched": [],
+  "missing_poems": []
 }
