@@ -324,6 +324,27 @@ def _stage_concurrency(stage: str) -> int:
     return max(1, mapping.get(stage, 1))
 
 
+def _resource_class(stage: str) -> str:
+    """阶段 → 资源类（闸门按资源类共享，见 RESOURCE_CLASS）。"""
+    return RESOURCE_CLASS.get(stage, "text")
+
+
+def _resource_concurrency(resource: str) -> int:
+    """资源类并发数（同一资源类的所有阶段共享一个桶）。
+
+    例：character 与 image 同为 image 类，共享 image_concurrency —— 避免
+    "定妆照 + 分镜图"各自开桶把图片并发翻倍、撞上游 RPM。
+    """
+    mapping = {
+        "text": settings.text_concurrency,
+        "image": settings.image_concurrency,
+        "tts": settings.tts_concurrency,
+        "video": settings.video_concurrency,
+        "local": settings.subtitle_concurrency,
+    }
+    return max(1, mapping.get(resource, 1))
+
+
 class DynamicSemaphore:
     """并发闸门（配置热更版）。
 
@@ -368,9 +389,12 @@ class QueueService:
     """生成队列（单进程内消费者；DB 持久化，重启安全）"""
 
     def __init__(self):
+        # 闸门按**资源类**共享（text/image/tts/video/local），不再按阶段各自开桶：
+        # 否则 script 与 publish_copy 会各开一个"文本桶"，把文本并发翻倍。
+        # 这是 A2 架构的基础——同资源类跨任务共用同一并发上限。
         self._sems: dict[str, DynamicSemaphore] = {
-            stage: DynamicSemaphore(lambda stage=stage: _stage_concurrency(stage))
-            for stage in STAGE_ORDER
+            rc: DynamicSemaphore(lambda rc=rc: _resource_concurrency(rc))
+            for rc in sorted(set(RESOURCE_CLASS.values()))
         }
         self._stop = False
         self._task: Optional[asyncio.Task] = None
@@ -598,62 +622,33 @@ class QueueService:
                 await asyncio.sleep(self._poll_interval)
 
     async def _claim_and_dispatch(self) -> int:
-        """扫描待办 Job，认领一个可执行的（依赖满足 + 阶段并发未满），派发执行。
+        """按资源类跨任务并发派发待办 Job（A2：prep 并行，video 门串行）。
 
-        严格任务间串行（一个任务必须整体跑完才轮到下一个）：
-        - 有 running Job → 只推进该任务的后续阶段，绝不跨任务并发；
-        - 无 running Job → 在所有有 pending Job 的任务里，按 task_id 升序
-          取第一个（先创建的先执行）；失败的任务排到最后。
-        同任务内不同阶段仍受各阶段并发桶约束（text/image 可并行，video 串行）。
+        与旧的"严格任务间串行"不同：不再把所有并发锁在单个任务上，而是按资源类
+        （text/image/tts/video/local）各自独立的闸门跨任务并发。75 个任务不再
+        "一个跑完再下一个"，而是：
+          - 文本（script/publish_copy）按 text_concurrency；
+          - 图片（character/image）按 image_concurrency 跨任务并发；
+          - TTS 按 tts_concurrency；字幕（本地 CPU）按 subtitle_concurrency；
+          - video 仍 video_concurrency=1 + 62s 最小间隔（agnes 1 次/分钟）。
+
+        排序键 (priority desc, queued_at asc, task_id asc, id asc) 保证：
+          - 阶段波次：高优先级阶段（script>publish_copy>character>image>tts>
+            subtitle>video）先派发；
+          - 同阶段内先创建先执行；重试刷新 queued_at 后自动排到队尾（FIFO-last）；
+          - video 优先级最低且同阶段内 task_id 升序 → 交付顺序 = 任务创建顺序
+            （A2 视频门 FIFO）。
+        单次调用尽量填满各资源桶（不再是"每轮只派 1 个"），返回本次派发数量。
         """
+        dispatched = 0
         async with async_session_factory() as session:
-            # 有 running Job → 锁定该任务（串行约束：同一时刻只有一个任务在跑）
-            running_task = (await session.execute(
-                select(Job.task_id).where(Job.status == "running").order_by(Job.task_id.asc()).limit(1)
-            )).scalar()
-
-            if running_task is not None:
-                active_task_id = running_task
-            else:
-                # 无 running → 取 task_id 最小的有 pending Job 的任务
-                pending_task_id = (await session.execute(
-                    select(Job.task_id).where(Job.status == "pending").order_by(Job.task_id.asc()).limit(1)
-                )).scalar()
-                if pending_task_id is None:
-                    return 0  # 没有 pending Job 了
-                active_task_id = pending_task_id
-
-            # 孤儿防御（2026-09-09 事故）：活动任务的 Task 记录已被删除（如用户
-            # 删任务后子表 Job 未级联清理的存量数据），其 pending Job 依赖检查
-            # 永远失败但永远占着"活动任务"位置（按优先级它总排第一），把其他
-            # 任务全部饿死。这里直接清掉孤儿 pending Job，下一轮自然轮到别的任务。
-            if await session.get(Task, active_task_id) is None:
-                orphan = (await session.execute(
-                    select(Job).where(
-                        Job.task_id == active_task_id, Job.status == "pending"
-                    )
-                )).scalars().all()
-                if orphan:
-                    for j in orphan:
-                        await session.delete(j)
-                    await session.commit()
-                    logger.warning(
-                        "🧹 孤儿清理：task=%s 已不存在，删除 %s 个 pending Job"
-                        "（防饿死其他任务）",
-                        active_task_id, len(orphan),
-                    )
-                return 0
-
-            # 重新拉取 pending Job（用 active_task_id 过滤）
             res = await session.execute(
                 select(Job)
-                .where(Job.status == "pending", Job.task_id == active_task_id)
-                # 排序：优先级降序 → 入队时刻升序（先创建先执行；重试刷新 queued_at
-                # 后自然排到队尾 = FIFO-last）→ id 升序兜底。coalesce 兼容旧 Job
-                # （queued_at 为 NULL）回退 created_at。
+                .where(Job.status == "pending")
                 .order_by(
                     Job.priority.desc(),
                     func.coalesce(Job.queued_at, Job.created_at).asc(),
+                    Job.task_id.asc(),
                     Job.id.asc(),
                 )
             )
@@ -661,10 +656,31 @@ class QueueService:
             if not candidates:
                 return 0
 
+            # 孤儿防御（2026-09-09 事故）：候选涉及的 task 已被删除（用户删任务后
+            # 子表 Job 未级联清理的存量数据），其 pending Job 依赖检查永远失败，
+            # 却按优先级占位把其他任务饿死。一次性清掉全部孤儿 pending Job。
+            task_ids = {j.task_id for j in candidates}
+            existing = set((await session.execute(
+                select(Task.id).where(Task.id.in_(task_ids))
+            )).scalars().all())
+            orphans = [j for j in candidates if j.task_id not in existing]
+            if orphans:
+                for j in orphans:
+                    await session.delete(j)
+                await session.commit()
+                logger.warning(
+                    "🧹 孤儿清理：%d 个 pending Job 所属任务已不存在，已删除"
+                    "（tasks=%s）",
+                    len(orphans), sorted({j.task_id for j in orphans}),
+                )
+                candidates = [j for j in candidates if j.task_id in existing]
+                if not candidates:
+                    return 0
+
             for job in candidates:
-                sem = self._sems[job.stage]
+                sem = self._sems[_resource_class(job.stage)]
                 if sem.locked():
-                    continue
+                    continue  # 该资源桶已满，留待下轮（不阻塞其他资源类）
                 if not await self._deps_satisfied(session, job):
                     await self._heal_prereqs(session, job)
                     continue
@@ -688,8 +704,8 @@ class QueueService:
 
                 await sem.acquire()
                 asyncio.create_task(self._run_job(job.id, sem))
-                return 1
-        return 0
+                dispatched += 1
+        return dispatched
 
     async def _heal_prereqs(self, session: AsyncSession, job: Job) -> None:
         """自愈：为「依赖未满足且无在途 Job」的前置阶段补建 Job。
@@ -1067,6 +1083,11 @@ class QueueService:
                 )
             return {
                 "poll_interval": self._poll_interval,
+                # 资源类并发（A2 闸门按资源类共享）
+                "resource_concurrency": {
+                    rc: _resource_concurrency(rc)
+                    for rc in sorted(set(RESOURCE_CLASS.values()))
+                },
                 "concurrency": {s: _stage_concurrency(s) for s in _enabled_stages()},
                 "enabled_stages": _enabled_stages(),
                 "counts_by_status": by_status,
