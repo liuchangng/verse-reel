@@ -42,7 +42,8 @@ async def script_env(monkeypatch):
         captured["keywords"] = kwargs.get("keywords")
         return "文案正文「金句」。"
 
-    async def fake_score(script_text):
+    async def fake_score(script_text, tier=None):
+        # score_script 现按档位选评审卡（tier），mock 需接受该 kwarg
         return ScoreResult(score=8.0, passed=True, feedback="ok")
 
     async def fake_voice(poem):

@@ -74,8 +74,12 @@ def test_task_produced_image_requires_image_urls():
     assert produced["character"] is True
 
 
-def test_expand_prereqs_backfills_image_for_video():
-    """重新生成 video 而分镜图缺失时，入队必须自动补建 image（死循环出口）。"""
+def test_expand_prereqs_backfills_image_for_video(monkeypatch):
+    """重新生成 video 而分镜图缺失时，入队必须自动补建 image（死循环出口）。
+
+    video 阶段默认关闭（enable_agnes_video=False），此处显式开启以覆盖 video 路径。
+    """
+    monkeypatch.setattr(qmod.settings, "enable_agnes_video", True)
     task = Task(id=1, poem_id=1, platform="douyin",
                 script="文案", character_ref="http://img/char.png",
                 image_urls=None, audio_url="http://a.mp3")
@@ -89,8 +93,12 @@ def test_expand_prereqs_backfills_image_for_video():
 # ---------------------------------------------------------------- #
 
 @pytest.mark.asyncio()
-async def test_enqueue_preserves_terminal_jobs_as_history(env):
-    """重新生成时 done/failed 旧 Job 保留（日志追加），pending/running 清掉。"""
+async def test_enqueue_preserves_terminal_jobs_as_history(env, monkeypatch):
+    """重新生成时 done/failed 旧 Job 保留（日志追加），pending/running 清掉。
+
+    video 阶段默认关闭，本用例覆盖 video 前置补建，故显式开启。
+    """
+    monkeypatch.setattr(qmod.settings, "enable_agnes_video", True)
     svc = QueueService()
     # 产物现状：script/character/tts 已有，image/video/subtitle 缺失
     # → 重新生成 ['video','subtitle'] 时 expand 只补 [image, video, subtitle]
