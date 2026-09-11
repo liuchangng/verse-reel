@@ -1,0 +1,778 @@
+{
+  "source": "教育部《义务教育语文课程标准（2022年版）》附录：1~6年级优秀诗文背诵推荐篇目",
+  "note": "小学 75 首（全部为诗歌）。标题/作者/朝代以课标原文为准；title 取课标篇名，author 与库 poems.author 对齐。",
+  "grade": "primary",
+  "count": 75,
+  "items": [
+    {
+      "no": 1,
+      "title": "江南",
+      "author": "汉乐府",
+      "dynasty": "汉",
+      "matched": true,
+      "first_line": "江南可采莲",
+      "poem_id": 3890,
+      "match_note": "江南/两汉乐府 (author别名修正)"
+    },
+    {
+      "no": 2,
+      "title": "长歌行",
+      "author": "汉乐府",
+      "dynasty": "汉",
+      "matched": true,
+      "first_line": "青青园中葵",
+      "poem_id": 3900,
+      "match_note": "长歌行/两汉乐府 (author别名修正)"
+    },
+    {
+      "no": 3,
+      "title": "敕勒歌",
+      "author": "北朝民歌",
+      "dynasty": "北朝",
+      "matched": true,
+      "first_line": "敕勒川",
+      "poem_id": 27671,
+      "match_note": "敕勒歌/无名氏 (author别名修正)"
+    },
+    {
+      "no": 4,
+      "title": "咏鹅",
+      "author": "骆宾王",
+      "dynasty": "唐",
+      "poem_id": 34285,
+      "matched": true,
+      "match_note": "咏鹅 / 骆宾王",
+      "first_line": "鹅鹅鹅"
+    },
+    {
+      "no": 5,
+      "title": "风",
+      "author": "李峤",
+      "dynasty": "唐",
+      "poem_id": 34768,
+      "matched": true,
+      "match_note": "风 / 李峤",
+      "first_line": "解落三秋叶"
+    },
+    {
+      "no": 6,
+      "title": "咏柳",
+      "author": "贺知章",
+      "dynasty": "唐",
+      "poem_id": 36468,
+      "matched": true,
+      "match_note": "咏柳 / 贺知章",
+      "first_line": "碧玉妆成一树高"
+    },
+    {
+      "no": 7,
+      "title": "回乡偶书",
+      "author": "贺知章",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "少小离家老大回",
+      "poem_id": 36469,
+      "match_note": "回乡偶书二首 / 贺知章"
+    },
+    {
+      "no": 8,
+      "title": "凉州词",
+      "author": "王之涣",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "黄河远上白云间",
+      "poem_id": 40773,
+      "match_note": "凉州词二首 / 王之涣"
+    },
+    {
+      "no": 9,
+      "title": "登鹳雀楼",
+      "author": "王之涣",
+      "dynasty": "唐",
+      "poem_id": 40771,
+      "matched": true,
+      "match_note": "登鹳雀楼 / 王之涣",
+      "first_line": "白日依山尽"
+    },
+    {
+      "no": 10,
+      "title": "春晓",
+      "author": "孟浩然",
+      "dynasty": "唐",
+      "poem_id": 40951,
+      "matched": true,
+      "match_note": "春晓 / 孟浩然",
+      "first_line": "春眠不觉晓"
+    },
+    {
+      "no": 11,
+      "title": "凉州词",
+      "author": "王翰",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "葡萄美酒夜光杯",
+      "poem_id": 41274,
+      "match_note": "凉州词二首 / 王翰"
+    },
+    {
+      "no": 12,
+      "title": "出塞",
+      "author": "王昌龄",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "秦时明月汉时关",
+      "poem_id": 42203,
+      "match_note": "出塞二首 / 王昌龄"
+    },
+    {
+      "no": 13,
+      "title": "芙蓉楼送辛渐",
+      "author": "王昌龄",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "寒雨连江夜入吴",
+      "poem_id": 42243,
+      "match_note": "芙蓉楼送辛渐二首 / 王昌龄"
+    },
+    {
+      "no": 14,
+      "title": "鹿柴",
+      "author": "王维",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "空山不见人",
+      "poem_id": 42869,
+      "match_note": "辋川集 鹿柴 / 王维"
+    },
+    {
+      "no": 15,
+      "title": "送元二使安西",
+      "author": "王维",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "渭城朝雨浥轻尘",
+      "poem_id": 43098,
+      "match_note": "渭城曲 送元二使安西 / 王维"
+    },
+    {
+      "no": 16,
+      "title": "九月九日忆山东兄弟",
+      "author": "王维",
+      "dynasty": "唐",
+      "poem_id": 42911,
+      "matched": true,
+      "match_note": "九月九日忆山东兄弟 / 王维",
+      "first_line": "独在异乡为异客"
+    },
+    {
+      "no": 17,
+      "title": "静夜思",
+      "author": "李白",
+      "dynasty": "唐",
+      "poem_id": 43303,
+      "matched": true,
+      "match_note": "静夜思 / 李白",
+      "first_line": "床前明月光"
+    },
+    {
+      "no": 18,
+      "title": "古朗月行",
+      "author": "李白",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "小时不识月",
+      "poem_id": 44133,
+      "match_note": "杂曲歌辞 古朗月行 / 李白"
+    },
+    {
+      "no": 19,
+      "title": "望庐山瀑布",
+      "author": "李白",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "日照香炉生紫烟",
+      "poem_id": 43412,
+      "match_note": "望庐山瀑布水二首 / 李白"
+    },
+    {
+      "no": 20,
+      "title": "赠汪伦",
+      "author": "李白",
+      "dynasty": "唐",
+      "poem_id": 43394,
+      "matched": true,
+      "match_note": "赠汪伦 / 李白",
+      "first_line": "李白乘舟将欲行"
+    },
+    {
+      "no": 21,
+      "title": "黄鹤楼送孟浩然之广陵",
+      "author": "李白",
+      "dynasty": "唐",
+      "poem_id": 43396,
+      "matched": true,
+      "match_note": "黄鹤楼送孟浩然之广陵 / 李白",
+      "first_line": "故人西辞黄鹤楼"
+    },
+    {
+      "no": 22,
+      "title": "早发白帝城",
+      "author": "李白",
+      "dynasty": "唐",
+      "poem_id": 43416,
+      "matched": true,
+      "match_note": "早发白帝城 / 李白",
+      "first_line": "朝辞白帝彩云间"
+    },
+    {
+      "no": 23,
+      "title": "望天门山",
+      "author": "李白",
+      "dynasty": "唐",
+      "poem_id": 43414,
+      "matched": true,
+      "match_note": "望天门山 / 李白",
+      "first_line": "天门中断楚江开"
+    },
+    {
+      "no": 24,
+      "title": "别董大",
+      "author": "高适",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "千里黄云白日曛",
+      "poem_id": 42507,
+      "match_note": "别董大二首 / 高适"
+    },
+    {
+      "no": 25,
+      "title": "绝句",
+      "author": "杜甫",
+      "dynasty": "唐",
+      "poem_id": 46169,
+      "matched": true,
+      "match_note": "绝句 / 杜甫",
+      "first_line": "两个黄鹂鸣翠柳"
+    },
+    {
+      "no": 26,
+      "title": "春夜喜雨",
+      "author": "杜甫",
+      "dynasty": "唐",
+      "poem_id": 45579,
+      "matched": true,
+      "match_note": "春夜喜雨 / 杜甫",
+      "first_line": "好雨知时节"
+    },
+    {
+      "no": 27,
+      "title": "绝句",
+      "author": "杜甫",
+      "dynasty": "唐",
+      "poem_id": 46169,
+      "matched": true,
+      "match_note": "绝句 / 杜甫",
+      "first_line": "迟日江山丽"
+    },
+    {
+      "no": 28,
+      "title": "江畔独步寻花",
+      "author": "杜甫",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "黄师塔前江水东",
+      "poem_id": 46786,
+      "match_note": "江畔独步寻花七绝句 / 杜甫"
+    },
+    {
+      "no": 29,
+      "title": "枫桥夜泊",
+      "author": "张继",
+      "dynasty": "唐",
+      "poem_id": 52855,
+      "matched": true,
+      "match_note": "枫桥夜泊 / 张继",
+      "first_line": "月落乌啼霜满天"
+    },
+    {
+      "no": 30,
+      "title": "滁州西涧",
+      "author": "韦应物",
+      "dynasty": "唐",
+      "poem_id": 52011,
+      "matched": true,
+      "match_note": "滁州西涧 / 韦应物",
+      "first_line": "独怜幽草涧边生"
+    },
+    {
+      "no": 31,
+      "title": "渔歌子",
+      "author": "张志和",
+      "dynasty": "唐",
+      "matched": false,
+      "first_line": "西塞山前白鹭飞",
+      "match_note": "库内未收录，需补录入库"
+    },
+    {
+      "no": 32,
+      "title": "塞下曲",
+      "author": "卢纶",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "月黑雁飞高",
+      "poem_id": 53814,
+      "match_note": "和张仆射塞下曲 / 卢纶"
+    },
+    {
+      "no": 33,
+      "title": "游子吟",
+      "author": "孟郊",
+      "dynasty": "唐",
+      "poem_id": 55672,
+      "matched": true,
+      "match_note": "游子吟 / 孟郊",
+      "first_line": "慈母手中线"
+    },
+    {
+      "no": 34,
+      "title": "早春呈水部张十八员外",
+      "author": "韩愈",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "天街小雨润如酥",
+      "poem_id": 64055,
+      "match_note": "早春呈水部张十八员外二首 / 韩愈"
+    },
+    {
+      "no": 35,
+      "title": "望洞庭",
+      "author": "刘禹锡",
+      "dynasty": "唐",
+      "poem_id": 65593,
+      "matched": true,
+      "match_note": "望洞庭 / 刘禹锡",
+      "first_line": "湖光秋月两相和"
+    },
+    {
+      "no": 36,
+      "title": "浪淘沙",
+      "author": "刘禹锡",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "九曲黄河万里沙",
+      "poem_id": 65828,
+      "match_note": "杂曲歌辞 / 刘禹锡"
+    },
+    {
+      "no": 37,
+      "title": "赋得古原草送别",
+      "author": "白居易",
+      "dynasty": "唐",
+      "poem_id": 66637,
+      "matched": true,
+      "match_note": "赋得古原草送别 / 白居易",
+      "first_line": "离离原上草"
+    },
+    {
+      "no": 38,
+      "title": "池上",
+      "author": "白居易",
+      "dynasty": "唐",
+      "poem_id": 66832,
+      "matched": true,
+      "match_note": "池上 / 白居易",
+      "first_line": "小娃撑小艇"
+    },
+    {
+      "no": 39,
+      "title": "忆江南",
+      "author": "白居易",
+      "dynasty": "唐",
+      "poem_id": 69463,
+      "matched": true,
+      "match_note": "忆江南 / 白居易",
+      "first_line": "江南好"
+    },
+    {
+      "no": 40,
+      "title": "小儿垂钓",
+      "author": "胡令能",
+      "dynasty": "唐",
+      "poem_id": 71195,
+      "matched": true,
+      "match_note": "小儿垂钓 / 胡令能",
+      "first_line": "蓬头稚子学垂纶"
+    },
+    {
+      "no": 41,
+      "title": "悯农",
+      "author": "李绅",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "锄禾日当午",
+      "poem_id": 66599,
+      "match_note": "悯农二首 / 李绅"
+    },
+    {
+      "no": 42,
+      "title": "悯农",
+      "author": "李绅",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "春种一粒粟",
+      "poem_id": 66599,
+      "match_note": "悯农二首 / 李绅"
+    },
+    {
+      "no": 43,
+      "title": "江雪",
+      "author": "柳宗元",
+      "dynasty": "唐",
+      "poem_id": 70507,
+      "matched": true,
+      "match_note": "江雪 / 柳宗元",
+      "first_line": "千山鸟飞绝"
+    },
+    {
+      "no": 44,
+      "title": "寻隐者不遇",
+      "author": "贾岛",
+      "dynasty": "唐",
+      "poem_id": 72800,
+      "matched": true,
+      "match_note": "寻隐者不遇 / 贾岛",
+      "first_line": "松下问童子"
+    },
+    {
+      "no": 45,
+      "title": "山行",
+      "author": "杜牧",
+      "dynasty": "唐",
+      "poem_id": 83435,
+      "matched": true,
+      "match_note": "山行 / 杜牧",
+      "first_line": "远上寒山石径斜"
+    },
+    {
+      "no": 46,
+      "title": "清明",
+      "author": "杜牧",
+      "dynasty": "唐",
+      "matched": false,
+      "first_line": "清明时节雨纷纷",
+      "match_note": "库内未收录，需补录入库"
+    },
+    {
+      "no": 47,
+      "title": "江南春",
+      "author": "杜牧",
+      "dynasty": "唐",
+      "matched": true,
+      "first_line": "千里莺啼绿映红",
+      "poem_id": 83350,
+      "match_note": "江南春绝句 / 杜牧"
+    },
+    {
+      "no": 48,
+      "title": "蜂",
+      "author": "罗隐",
+      "dynasty": "唐",
+      "poem_id": 90470,
+      "matched": true,
+      "match_note": "蜂 / 罗隐",
+      "first_line": "不论平地与山尖"
+    },
+    {
+      "no": 49,
+      "title": "江上渔者",
+      "author": "范仲淹",
+      "dynasty": "宋",
+      "poem_id": 121766,
+      "matched": true,
+      "match_note": "江上渔者 / 范仲淹",
+      "first_line": "江上往来人"
+    },
+    {
+      "no": 50,
+      "title": "元日",
+      "author": "王安石",
+      "dynasty": "宋",
+      "poem_id": 165797,
+      "matched": true,
+      "match_note": "元日 / 王安石",
+      "first_line": "爆竹声中一岁除"
+    },
+    {
+      "no": 51,
+      "title": "泊船瓜洲",
+      "author": "王安石",
+      "dynasty": "宋",
+      "poem_id": 165957,
+      "matched": true,
+      "match_note": "泊船瓜洲 / 王安石",
+      "first_line": "京口瓜洲一水间"
+    },
+    {
+      "no": 52,
+      "title": "书湖阴先生壁",
+      "author": "王安石",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "茅檐长扫净无苔",
+      "poem_id": 165927,
+      "match_note": "书湖阴先生壁二首 / 王安石"
+    },
+    {
+      "no": 53,
+      "title": "六月二十七日望湖楼醉书",
+      "author": "苏轼",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "黑云翻墨未遮山",
+      "poem_id": 187601,
+      "match_note": "六月二十七日望湖楼醉书五绝 / 苏轼"
+    },
+    {
+      "no": 54,
+      "title": "饮湖上初晴后雨",
+      "author": "苏轼",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "水光潋滟晴方好",
+      "poem_id": 187645,
+      "match_note": "饮湖上初晴后雨二首 / 苏轼"
+    },
+    {
+      "no": 55,
+      "title": "惠崇春江晚景",
+      "author": "苏轼",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "竹外桃花三两枝",
+      "poem_id": 187880,
+      "match_note": "惠崇春江晚景二首 / 苏轼"
+    },
+    {
+      "no": 56,
+      "title": "题西林壁",
+      "author": "苏轼",
+      "dynasty": "宋",
+      "poem_id": 187844,
+      "matched": true,
+      "match_note": "题西林壁 / 苏轼",
+      "first_line": "横看成岭侧成峰"
+    },
+    {
+      "no": 57,
+      "title": "夏日绝句",
+      "author": "李清照",
+      "dynasty": "宋",
+      "poem_id": 281230,
+      "matched": true,
+      "match_note": "夏日绝句 / 李清照",
+      "first_line": "生当作人杰"
+    },
+    {
+      "no": 58,
+      "title": "三衢道中",
+      "author": "曾几",
+      "dynasty": "宋",
+      "poem_id": 280944,
+      "matched": true,
+      "match_note": "三衢道中 / 曾几",
+      "first_line": "梅子黄时日日晴"
+    },
+    {
+      "no": 59,
+      "title": "示儿",
+      "author": "陆游",
+      "dynasty": "宋",
+      "poem_id": 359305,
+      "matched": true,
+      "match_note": "示儿 / 陆游",
+      "first_line": "死去元知万事空"
+    },
+    {
+      "no": 60,
+      "title": "秋夜将晓出篱门迎凉有感",
+      "author": "陆游",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "三万里河东入海",
+      "poem_id": 363981,
+      "match_note": "秋夜将晓出篱门迎凉有感二首 / 陆游"
+    },
+    {
+      "no": 61,
+      "title": "四时田园杂兴",
+      "author": "范成大",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "昼出耘田夜绩麻",
+      "poem_id": 375417,
+      "match_note": "四时田园杂兴六十首 / 范成大"
+    },
+    {
+      "no": 62,
+      "title": "四时田园杂兴",
+      "author": "范成大",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "梅子金黄杏子肥",
+      "poem_id": 375417,
+      "match_note": "四时田园杂兴六十首 / 范成大"
+    },
+    {
+      "no": 63,
+      "title": "小池",
+      "author": "杨万里",
+      "dynasty": "宋",
+      "poem_id": 378436,
+      "matched": true,
+      "match_note": "小池 / 杨万里",
+      "first_line": "泉眼无声惜细流"
+    },
+    {
+      "no": 64,
+      "title": "晓出净慈寺送林子方",
+      "author": "杨万里",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "毕竟西湖六月中",
+      "poem_id": 379389,
+      "match_note": "晓出浄慈送林子方二首 / 杨万里"
+    },
+    {
+      "no": 65,
+      "title": "春日",
+      "author": "朱熹",
+      "dynasty": "宋",
+      "poem_id": 387124,
+      "matched": true,
+      "match_note": "春日 / 朱熹",
+      "first_line": "胜日寻芳泗水滨"
+    },
+    {
+      "no": 66,
+      "title": "观书有感",
+      "author": "朱熹",
+      "dynasty": "宋",
+      "matched": true,
+      "first_line": "半亩方塘一鉴开",
+      "poem_id": 387126,
+      "match_note": "观书有感二首 / 朱熹"
+    },
+    {
+      "no": 67,
+      "title": "题临安邸",
+      "author": "林升",
+      "dynasty": "宋",
+      "poem_id": 426556,
+      "matched": true,
+      "match_note": "题临安邸 / 林升",
+      "first_line": "山外青山楼外楼"
+    },
+    {
+      "no": 68,
+      "title": "游园不值",
+      "author": "叶绍翁",
+      "dynasty": "宋",
+      "poem_id": 503976,
+      "matched": true,
+      "match_note": "游园不值 / 叶绍翁",
+      "first_line": "应怜屐齿印苍苔"
+    },
+    {
+      "no": 69,
+      "title": "乡村四月",
+      "author": "翁卷",
+      "dynasty": "宋",
+      "poem_id": 500563,
+      "matched": true,
+      "match_note": "乡村四月 / 翁卷",
+      "first_line": "绿遍山原白满川"
+    },
+    {
+      "no": 70,
+      "title": "墨梅",
+      "author": "王冕",
+      "dynasty": "元",
+      "poem_id": 617375,
+      "matched": true,
+      "match_note": "墨梅 / 王冕",
+      "first_line": "我家洗砚池头树"
+    },
+    {
+      "no": 71,
+      "title": "石灰吟",
+      "author": "于谦",
+      "dynasty": "明",
+      "matched": true,
+      "first_line": "千锤万凿出深山",
+      "poem_id": 723148,
+      "match_note": "咏石灰 / 于谦"
+    },
+    {
+      "no": 72,
+      "title": "竹石",
+      "author": "郑燮",
+      "dynasty": "清",
+      "matched": true,
+      "first_line": "咬定青山不放松",
+      "poem_id": 1463902,
+      "match_note": "题竹石 / 郑燮"
+    },
+    {
+      "no": 73,
+      "title": "所见",
+      "author": "袁枚",
+      "dynasty": "清",
+      "poem_id": 1544896,
+      "matched": true,
+      "match_note": "所见 / 袁枚",
+      "first_line": "牧童骑黄牛"
+    },
+    {
+      "no": 74,
+      "title": "己亥杂诗",
+      "author": "龚自珍",
+      "dynasty": "清",
+      "poem_id": 1771122,
+      "matched": true,
+      "match_note": "己亥杂诗 / 龚自珍",
+      "first_line": "九州生气恃风雷"
+    },
+    {
+      "no": 75,
+      "title": "村居",
+      "author": "高鼎",
+      "dynasty": "清",
+      "poem_id": 1709682,
+      "matched": true,
+      "match_note": "村居 / 高鼎",
+      "first_line": "草长莺飞二月天"
+    }
+  ],
+  "matched_count": 73,
+  "unmatched_count": 2,
+  "unmatched": [
+    {
+      "no": 31,
+      "title": "渔歌子",
+      "author": "张志和",
+      "dynasty": "唐",
+      "status": "missing"
+    },
+    {
+      "no": 46,
+      "title": "清明",
+      "author": "杜牧",
+      "dynasty": "唐",
+      "status": "missing"
+    }
+  ],
+  "missing_poems": [
+    31,
+    46
+  ]
+}
