@@ -393,11 +393,11 @@ onMounted(() => fetchTasks())
 .col-action { white-space: nowrap; }
 
 /* 分页 */
-.pagination { display: flex; align-items: center; justify-content: center; gap: var(--spacing-3); padding: var(--spacing-3) var(--spacing-4); border-top: 1px solid var(--color-border-light); background: #faf8f5; }
-.page-btn { padding: 4px 14px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-card); color: var(--color-text-secondary); font-size: 13px; cursor: pointer; transition: all 0.15s; }
+.pagination { display: flex; align-items: center; justify-content: center; gap: var(--spacing-3); padding: var(--spacing-3) var(--spacing-4); border-top: 1px solid var(--color-border-light); background: #faf8f5; flex-wrap: wrap; }
+.page-btn { padding: 4px 14px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-card); color: var(--color-text-secondary); font-size: 13px; cursor: pointer; transition: all 0.15s; white-space: nowrap; flex-shrink: 0; }
 .page-btn:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-bg); }
 .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.page-info { font-size: 13px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+.page-info { font-size: 13px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* 阶段 badge */
 .stage-badge { display: inline-block; padding: 2px 10px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 500; background: rgba(201, 166, 107, 0.1); color: #8b6914; }
