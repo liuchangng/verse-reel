@@ -249,9 +249,9 @@
       "title": "绝句",
       "author": "杜甫",
       "dynasty": "唐",
-      "poem_id": 46169,
+      "poem_id": 46230,
       "matched": true,
-      "match_note": "绝句 / 杜甫",
+      "match_note": "绝句四首 / 杜甫（两个黄鹂鸣翠柳）",
       "first_line": "两个黄鹂鸣翠柳"
     },
     {
@@ -269,9 +269,9 @@
       "title": "绝句",
       "author": "杜甫",
       "dynasty": "唐",
-      "poem_id": 46169,
+      "poem_id": 46170,
       "matched": true,
-      "match_note": "绝句 / 杜甫",
+      "match_note": "绝句二首 / 杜甫（迟日江山丽）",
       "first_line": "迟日江山丽"
     },
     {
@@ -411,8 +411,8 @@
       "dynasty": "唐",
       "matched": true,
       "first_line": "锄禾日当午",
-      "poem_id": 66599,
-      "match_note": "悯农二首 / 李绅"
+      "poem_id": 66600,
+      "match_note": "悯农二首其二 / 李绅（锄田当日午）"
     },
     {
       "no": 42,
@@ -422,7 +422,7 @@
       "matched": true,
       "first_line": "春种一粒粟",
       "poem_id": 66599,
-      "match_note": "悯农二首 / 李绅"
+      "match_note": "悯农二首其一 / 李绅（春种一粒粟）"
     },
     {
       "no": 43,
@@ -611,8 +611,8 @@
       "dynasty": "宋",
       "matched": true,
       "first_line": "昼出耘田夜绩麻",
-      "poem_id": 375417,
-      "match_note": "四时田园杂兴六十首 / 范成大"
+      "poem_id": 375447,
+      "match_note": "四时田园杂兴六十首 / 范成大（昼出耘田夜绩麻）"
     },
     {
       "no": 62,
@@ -621,8 +621,8 @@
       "dynasty": "宋",
       "matched": true,
       "first_line": "梅子金黄杏子肥",
-      "poem_id": 375417,
-      "match_note": "四时田园杂兴六十首 / 范成大"
+      "poem_id": 375441,
+      "match_note": "四时田园杂兴六十首 / 范成大（梅子金黄杏子肥）"
     },
     {
       "no": 63,
