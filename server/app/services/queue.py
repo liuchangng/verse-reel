@@ -171,6 +171,26 @@ STAGE_PREREQS = {
     "subtitle": {"video", "tts"},
 }
 
+def _stage_enabled(stage: str) -> bool:
+    """阶段是否启用。未启用的阶段不入队、不参与依赖判定、不计入终态。
+
+    video：agnes 生成的视频片段在成片里被 final.mp4（图片 + TTS 幻灯片）完全
+    覆盖，``enable_agnes_video=False`` 时本应跳过。但旧实现只有 ``run_pipeline``
+    （旧直跑路径）检查了该开关，**队列路径 ``run_stage`` 没有检查** —— 于是每个
+    任务都真实调用一次 agnes 视频：实测单阶段均值 96s（全阶段最慢），还独占
+    1 次/分钟的全局限流，产出的片段最后被丢弃。75 首累计浪费约 2 小时与全部
+    视频 API 费用。这里把"阶段是否启用"提升为队列的一等概念。
+    """
+    if stage == "video":
+        return bool(getattr(settings, "enable_agnes_video", False))
+    return True
+
+
+def _enabled_stages() -> list[str]:
+    """当前启用的阶段列表（按 STAGE_ORDER 排序）。"""
+    return [s for s in STAGE_ORDER if _stage_enabled(s)]
+
+
 # 消费优先级：快速阶段高、视频低（方式二批处理的核心）
 STAGE_PRIORITY = {
     "script": 60,
@@ -194,7 +214,9 @@ STAGE_OUTPUTS = {
 }
 
 
-def _expand_prereqs(stages: list[str], produced: dict[str, bool]) -> list[str]:
+def _expand_prereqs(
+    stages: list[str], produced: dict[str, bool], allow_disabled: bool = False
+) -> list[str]:
     """把用户指定的阶段补全为「含全部未满足前置」的阶段集合。
 
     问题背景：用户点「只重生成图片」，但任务的 ``character_ref`` 为空 ——
@@ -205,16 +227,24 @@ def _expand_prereqs(stages: list[str], produced: dict[str, bool]) -> list[str]:
     Args:
         stages: 用户希望重跑的阶段
         produced: ``_task_produced(task)`` 的结果（**必须在清空产物之前计算**）
+        allow_disabled: True = 用户显式指定该阶段，忽略启用开关（例：手动
+            ``regenerate?stage=video`` 即使 enable_agnes_video=False 也强制生成）
 
     Returns:
         补全并按 STAGE_ORDER 排序后的阶段列表
     """
-    need = {s for s in stages if s in STAGE_PREREQS}
+    def _ok(s: str) -> bool:
+        return allow_disabled or _stage_enabled(s)
+
+    # 未启用阶段（如 enable_agnes_video=False 时的 video）不入队，也不作为前置
+    need = {s for s in stages if s in STAGE_PREREQS and _ok(s)}
     changed = True
     while changed:
         changed = False
         for st in list(need):
             for pre in STAGE_PREREQS.get(st, set()):
+                if not _ok(pre):
+                    continue
                 if pre not in need and not produced.get(pre, False):
                     need.add(pre)
                     changed = True
@@ -325,20 +355,23 @@ class QueueService:
         stages: Optional[list[str]] = None,
         clear_outputs: bool = False,
         source: str = "unknown",
+        allow_disabled: bool = False,
     ) -> int:
         """为任务创建阶段 Job（pending）。
 
         Args:
             task_id: 业务任务 ID
-            stages: 要生成的阶段；默认全部
+            stages: 要生成的阶段；默认全部（仅启用阶段）
             clear_outputs: 是否清空该任务已有的视觉产物（用于重新生成）
+            allow_disabled: 用户显式指定阶段时置 True，允许生成未启用阶段
+                （如手动 regenerate?stage=video 强制跑 agnes 视频）
             source: 调用来源标识（create_task / regenerate / batch / recover ...），
                     仅用于审计日志——2026-09-09 事故：任务"莫名又重新生成了一遍"却
                     无法从 DB 反查是谁触发的。所有调用方必须自报来源。
         Returns:
             创建的 Job 数量
         """
-        stages = stages or list(STAGE_ORDER)
+        stages = stages or _enabled_stages()
 
         async with async_session_factory() as session:
             # 清理该任务旧 Job：只删 pending/running（未产生历史、留着会重复消费），
@@ -364,7 +397,7 @@ class QueueService:
             # 再据此做依赖补全（否则 character_ref 被清掉后会误判为前置缺失）
             task = await session.get(Task, task_id)
             produced = _task_produced(task) if task else {}
-            expanded = _expand_prereqs(stages, produced)
+            expanded = _expand_prereqs(stages, produced, allow_disabled=allow_disabled)
             if expanded != list(stages):
                 logger.info(f"入队任务 {task_id} 依赖补全: {list(stages)} -> {expanded}")
             stages = expanded
@@ -382,7 +415,7 @@ class QueueService:
                 task.error_message = None
                 task.review_status = "pending"
                 task.completed_at = None
-                if len(stages) >= len(STAGE_ORDER):
+                if len(stages) >= len(_enabled_stages()):
                     task.progress = 0
                 await session.commit()
                 if cleared:
@@ -412,6 +445,28 @@ class QueueService:
     # ------------------------------------------------------------------ #
     async def recover(self):
         """后端启动时调用：将上次运行残留的 running Job 复位为 pending，使其被重新消费。"""
+        # 清理未启用阶段的存量在途 Job（如关闭 enable_agnes_video 后残留的
+        # video Job）。只删 pending/running；done/failed 留作历史，且已被
+        # _maybe_finalize 排除在终态判定之外。
+        disabled = [s for s in STAGE_ORDER if not _stage_enabled(s)]
+        if disabled:
+            async with async_session_factory() as session:
+                res = await session.execute(
+                    select(Job).where(
+                        Job.stage.in_(disabled),
+                        Job.status.in_(("pending", "running")),
+                    )
+                )
+                stale = res.scalars().all()
+                for j in stale:
+                    await session.delete(j)
+                if stale:
+                    await session.commit()
+                    logger.warning(
+                        f"队列恢复：删除 {len(stale)} 个未启用阶段的在途 Job"
+                        f"（stages={disabled}，开关变更后残留）"
+                    )
+
         async with async_session_factory() as session:
             res = await session.execute(select(Job).where(Job.status == "running"))
             orphan = res.scalars().all()
@@ -599,7 +654,8 @@ class QueueService:
         防死循环：已经 **failed** 的前置阶段不补建，改为级联失败本任务
         全部 pending Job（见 ``_cascade_fail_pending``），让任务干净落终态。
         """
-        prereqs = STAGE_PREREQS.get(job.stage, set())
+        # 未启用阶段不作为前置（enable_agnes_video=False 时不补建 video Job）
+        prereqs = {p for p in STAGE_PREREQS.get(job.stage, set()) if _stage_enabled(p)}
         if not prereqs:
             return
         task = await session.get(Task, job.task_id)
@@ -677,7 +733,8 @@ class QueueService:
         / audio_url / video_url。这样已经生成过的产物自然满足依赖，
         实现"幂等重新生成某个阶段"的需求。
         """
-        prereqs = STAGE_PREREQS.get(job.stage, set())
+        # 未启用阶段不参与依赖判定（否则 video 关闭后 subtitle 永远等不到 video_url）
+        prereqs = {p for p in STAGE_PREREQS.get(job.stage, set()) if _stage_enabled(p)}
         if not prereqs:
             return True
         task = await session.get(Task, job.task_id)
@@ -814,6 +871,8 @@ class QueueService:
             return  # 仍在推进（或新一轮重试在途），不是终态
         latest: dict[str, str] = {}
         for j in jobs:
+            if not _stage_enabled(j.stage):
+                continue  # 未启用阶段的历史 Job（含曾经的 failed）不得拖入终态判定
             latest[j.stage] = j.status  # id 升序遍历 → 每阶段留最新状态
         states = latest
         task = await session.get(Task, task_id)
@@ -854,7 +913,8 @@ class QueueService:
                 )
             return {
                 "poll_interval": self._poll_interval,
-                "concurrency": {s: _stage_concurrency(s) for s in STAGE_ORDER},
+                "concurrency": {s: _stage_concurrency(s) for s in _enabled_stages()},
+                "enabled_stages": _enabled_stages(),
                 "counts_by_status": by_status,
                 "tasks": by_task,
             }

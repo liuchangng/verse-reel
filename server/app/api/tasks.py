@@ -14,7 +14,7 @@ from sqlalchemy import select, func
 from app.database import get_db, async_session_factory
 from app.models.task import Task
 from app.models.job import Job
-from app.services.queue import STAGE_ORDER, queue_service
+from app.services.queue import STAGE_ORDER, queue_service, _enabled_stages
 from app.models.poem import Poem
 from app.services.pipeline import pipeline_engine
 from app.services.prompt_optimizer import list_styles, normalize_style, DEFAULT_STYLE
@@ -652,7 +652,7 @@ async def regenerate_task(
             )
 
     if stage == "all":
-        stages = list(STAGE_ORDER)
+        stages = list(_enabled_stages())
         clear_outputs = True
     elif stage in STAGE_ORDER:
         stages = [stage]
@@ -747,7 +747,7 @@ async def batch_generate(
     # 2) 逐任务入队（依赖补全 + 死锁自愈在队列内自动处理）
     results = []
     total_jobs = 0
-    stages_arg = list(STAGE_ORDER) if stage == "all" else [stage]
+    stages_arg = list(_enabled_stages()) if stage == "all" else [stage]
     for t in tasks:
         try:
             # 立即翻 processing + current_stage，前端实时可见（不必等队列 claim）
