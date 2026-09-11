@@ -292,6 +292,22 @@ class Settings(BaseSettings):
     # ====== 队列配置 ======
     # 消费者轮询间隔（秒）：扫描待办 Job 的频率
     queue_poll_interval: float = Field(default=2.0)
+
+    # ---- job 心跳与分资源超时（状态机最后一环：running ->(超时)-> failed）----
+    # 背景：job 生命周期原为 pending→running→done/failed，缺"超时"这一环。
+    # 进程崩溃 / 上游挂起 / ffmpeg 卡死都会留下永久 running，而严格串行把
+    # "存在 running"当作全局锁，于是单个 job 卡死 = 整个队列停摆（真实事故：
+    # job 177 卡 8 小时，57 个 pending 全部饿死）。心跳让"慢" 与 "死" 可区分。
+    # 心跳刷新间隔（秒）：必须远小于最短超时，否则正常 job 会被误判
+    job_heartbeat_interval: float = Field(default=30.0)
+    # 各资源类超时（秒）：按资源类的真实耗时量级设定，均留足 2x 以上余量
+    job_timeout_text: float = Field(default=300.0)      # 5 min  LLM 文案/分镜/评分
+    job_timeout_image: float = Field(default=600.0)     # 10 min 定妆照/分镜图
+    job_timeout_tts: float = Field(default=600.0)       # 10 min 语音合成
+    job_timeout_video: float = Field(default=1800.0)    # 30 min 视频生成（含 1/min 排队）
+    job_timeout_local: float = Field(default=900.0)     # 15 min 字幕烧制/成片合成（CPU）
+    # 超时回收扫描间隔（秒）：无需每轮派发都扫，独立于 poll_interval 节流
+    job_reap_interval: float = Field(default=20.0)
     
     # 数据库配置 - 使用绝对路径
     database_url: str = Field(default="")

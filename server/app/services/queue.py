@@ -18,7 +18,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -170,6 +170,25 @@ STAGE_PREREQS = {
     "video": {"image"},
     "subtitle": {"video", "tts"},
 }
+
+# 资源类映射：阶段 → 底层资源类型。用于
+#   1) 并发闸门（同类阶段共享一个并发桶，如 character/image 同抢图片并发）；
+#   2) 分资源超时（各资源类真实耗时量级不同，见 settings.job_timeout_*）。
+RESOURCE_CLASS: dict[str, str] = {
+    "script": "text",
+    "character": "image",
+    "image": "image",
+    "tts": "tts",
+    "video": "video",
+    "subtitle": "local",
+}
+
+
+def _job_timeout_seconds(stage: str) -> float:
+    """该阶段对应资源类的超时阈值（秒）。未知阶段回退 text 档。"""
+    rc = RESOURCE_CLASS.get(stage, "text")
+    return float(getattr(settings, f"job_timeout_{rc}", 600.0))
+
 
 def _stage_enabled(stage: str) -> bool:
     """阶段是否启用。未启用的阶段不入队、不参与依赖判定、不计入终态。
@@ -422,6 +441,7 @@ class QueueService:
                     logger.info(f"入队任务 {task_id} 清空产物字段: {','.join(cleared)}")
 
             count = 0
+            now = datetime.now(timezone.utc)
             for stage in stages:
                 job = Job(
                     task_id=task_id,
@@ -429,6 +449,9 @@ class QueueService:
                     status="pending",
                     priority=STAGE_PRIORITY.get(stage, 0),
                     attempts=0,
+                    # 入队时刻 = FIFO 排序键（同优先级下 queued_at 升序 = 先创建先执行；
+                    # 失败重试时刷新为当前时刻，自然排到队尾）
+                    queued_at=now,
                 )
                 session.add(job)
                 count += 1
@@ -546,9 +569,15 @@ class QueueService:
     # 消费者主循环
     # ------------------------------------------------------------------ #
     async def _worker_loop(self):
+        last_reap = 0.0
+        reap_interval = float(getattr(settings, "job_reap_interval", 20.0))
         while not self._stop:
             try:
                 _touch_instance_lock()  # 心跳：僵死超过阈值后锁可被其他实例回收
+                now = time.monotonic()
+                if now - last_reap >= reap_interval:
+                    last_reap = now
+                    await self._reap_stale_jobs()  # 超时回收：running ->(超时)-> failed
                 claimed = await self._claim_and_dispatch()
             except Exception as e:
                 logger.error(f"队列消费者异常: {e}")
@@ -607,7 +636,14 @@ class QueueService:
             res = await session.execute(
                 select(Job)
                 .where(Job.status == "pending", Job.task_id == active_task_id)
-                .order_by(Job.priority.desc(), Job.created_at.asc(), Job.id.asc())
+                # 排序：优先级降序 → 入队时刻升序（先创建先执行；重试刷新 queued_at
+                # 后自然排到队尾 = FIFO-last）→ id 升序兜底。coalesce 兼容旧 Job
+                # （queued_at 为 NULL）回退 created_at。
+                .order_by(
+                    Job.priority.desc(),
+                    func.coalesce(Job.queued_at, Job.created_at).asc(),
+                    Job.id.asc(),
+                )
             )
             candidates = res.scalars().all()
             if not candidates:
@@ -625,7 +661,7 @@ class QueueService:
                 claimed = await session.execute(
                     update(Job)
                     .where(Job.id == job.id, Job.status == "pending")
-                    .values(status="running", started_at=now)
+                    .values(status="running", started_at=now, heartbeat_at=now)
                 )
                 await session.commit()
                 if claimed.rowcount != 1:
@@ -636,6 +672,7 @@ class QueueService:
                     continue
                 job.status = "running"
                 job.started_at = now
+                job.heartbeat_at = now
 
                 await sem.acquire()
                 asyncio.create_task(self._run_job(job.id, sem))
@@ -691,6 +728,7 @@ class QueueService:
                     status="pending",
                     priority=STAGE_PRIORITY.get(st, 0),
                     attempts=0,
+                    queued_at=datetime.now(timezone.utc),
                 )
             )
             created.append(st)
@@ -762,6 +800,7 @@ class QueueService:
     # 单 Job 执行
     # ------------------------------------------------------------------ #
     async def _run_job(self, job_id: int, sem: asyncio.Semaphore):
+        hb_task: Optional[asyncio.Task] = None
         try:
             # 视频阶段：进入前先按 agnes 1次/分钟 规约等待（D6/D7 修复）。
             # 旧版仅靠 sem=1 限制"同时 1 个"，但两条 video 任务间隔 30s
@@ -771,6 +810,10 @@ class QueueService:
             job = await _load_job(job_id)
             if job and job.stage == "video":
                 await self._await_video_slot(job.task_id, job_id)
+
+            # 心跳：执行期间周期性刷新 heartbeat_at（独立 session，不阻塞主事务）。
+            # 卡死/进程崩溃时心跳停摆 → _reap_stale_jobs 按分资源超时回收。
+            hb_task = asyncio.create_task(self._heartbeat_loop(job_id))
 
             async with async_session_factory() as session:
                 job = await session.get(Job, job_id)
@@ -782,6 +825,16 @@ class QueueService:
 
                 try:
                     await pipeline_engine.run_stage(session, task_id, stage)
+                    # 完成回写前先刷新：若本 Job 已被超时回收器改判（pending/failed），
+                    # 说明它被判为卡死并已重排/落败，此处不得再用迟到的 done 覆盖。
+                    await session.refresh(job)
+                    if job.status != "running":
+                        logger.warning(
+                            "♻️ Job#%s task=%s stage=%s 执行完成但已被回收器改判"
+                            "（status=%s），放弃回写 done",
+                            job_id, task_id, stage, job.status,
+                        )
+                        return
                     job.status = "done"
                     job.finished_at = datetime.now(timezone.utc)
                     self._log_attempt(job, ok=True)
@@ -791,28 +844,117 @@ class QueueService:
                     await session.commit()
                     logger.info(f"✅ Job#{job_id} task={task_id} stage={stage} 完成")
                 except Exception as e:
+                    await session.refresh(job)
+                    if job.status != "running":
+                        logger.warning(
+                            "♻️ Job#%s task=%s 执行异常但已被回收器改判（status=%s），放弃回写",
+                            job_id, task_id, job.status,
+                        )
+                        return
                     job.attempts += 1
                     job.last_error = str(e)[:800]
                     self._log_attempt(job, ok=False, error=str(e)[:300])
-                    # 未超重试次数 → 退回 pending 自动重试；否则标记 failed
+                    # 未超重试次数 → 退回 pending 自动重试（queued_at 刷到当前时刻
+                    # = 排到队尾，满足「失败重试放最后」）；否则标记 failed
                     if job.attempts < max(1, settings.max_retries):
                         job.status = "pending"
+                        job.queued_at = datetime.now(timezone.utc)
+                        job.started_at = None
+                        job.heartbeat_at = None
+                        job.finished_at = None
                         logger.warning(
                             f"⚠️ Job#{job_id} task={task_id} stage={stage} 失败"
-                            f"（第 {job.attempts} 次，将重试）: {e}"
+                            f"（第 {job.attempts} 次，已重排到队尾）: {e}"
                         )
                     else:
                         job.status = "failed"
+                        job.finished_at = datetime.now(timezone.utc)
                         logger.error(
                             f"❌ Job#{job_id} task={task_id} stage={stage} 永久失败: {e}"
                         )
-                    job.finished_at = datetime.now(timezone.utc)
                     await session.commit()
 
                 # 阶段结束后，检查是否可进入终态
                 await self._maybe_finalize(session, task_id)
         finally:
+            if hb_task is not None:
+                hb_task.cancel()
+                try:
+                    await hb_task
+                except asyncio.CancelledError:
+                    pass
             sem.release()
+
+    async def _heartbeat_loop(self, job_id: int) -> None:
+        """周期性刷新 running Job 的心跳（仅供 _run_job 内部启动/取消）。"""
+        interval = max(2.0, float(getattr(settings, "job_heartbeat_interval", 30.0)))
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                async with async_session_factory() as session:
+                    await session.execute(
+                        update(Job)
+                        .where(Job.id == job_id, Job.status == "running")
+                        .values(heartbeat_at=datetime.now(timezone.utc))
+                    )
+                    await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # 心跳失败不致命，记录后下轮再试
+                logger.debug("Job#%s 心跳刷新失败: %s", job_id, exc)
+
+    async def _reap_stale_jobs(self) -> int:
+        """回收心跳停摆超时的 running Job（状态机最后一环：running ->(超时)-> failed）。
+
+        背景：真实事故 job 177 卡 8 小时。严格串行把"存在 running"当全局锁，
+        于是单个卡死 Job = 整个队列停摆（57 个 pending 全部饿死）。心跳让
+        "正常慢" 与 "已卡死" 可区分：超过该资源类超时阈值仍无心跳 → 认定卡死，
+        按失败处理（未超重试次数则重排到队尾）。
+        """
+        now = datetime.now(timezone.utc)
+        reaped: list[tuple[int, int]] = []  # (job_id, task_id)
+        async with async_session_factory() as session:
+            res = await session.execute(select(Job).where(Job.status == "running"))
+            for j in res.scalars().all():
+                t = j.heartbeat_at or j.started_at
+                if t is None:
+                    # 无时间基线（旧数据/异常）：补一个基线，跳过本轮，下轮再判
+                    j.heartbeat_at = now
+                    continue
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                age = (now - t).total_seconds()
+                limit = _job_timeout_seconds(j.stage)
+                if age <= limit:
+                    continue
+                j.attempts += 1
+                j.last_error = (
+                    f"[超时回收] stage={j.stage} 心跳停滞 {age:.0f}s > 阈值 {limit:.0f}s"
+                )
+                self._log_attempt(j, ok=False, error=j.last_error[:300])
+                if j.attempts < max(1, settings.max_retries):
+                    j.status = "pending"
+                    j.queued_at = now          # 排到队尾（FIFO-last）
+                    j.started_at = None
+                    j.heartbeat_at = None
+                    j.finished_at = None
+                else:
+                    j.status = "failed"
+                    j.finished_at = now
+                reaped.append((j.id, j.task_id))
+            if reaped:
+                await session.commit()
+
+        if reaped:
+            logger.warning(
+                "⏱️ 超时回收 %d 个卡死 Job: %s",
+                len(reaped), ", ".join(f"#{jid}(task={tid})" for jid, tid in reaped),
+            )
+            # 回收后重新判定受影响任务终态（可能全部阶段已落终态/仍有 pending 重跑）
+            for _, tid in reaped:
+                async with async_session_factory() as session:
+                    await self._maybe_finalize(session, tid)
+        return len(reaped)
 
     @staticmethod
     def _log_attempt(job: Job, ok: bool, error: str = "") -> None:

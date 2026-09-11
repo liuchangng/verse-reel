@@ -35,6 +35,15 @@ class Job(Base):
     priority = Column(Integer, default=0, comment="消费优先级（越大越先）")
     # 额外参数（JSON 字符串）
     payload = Column(Text, nullable=True, comment="阶段额外参数(JSON)")
+    # 泳道：batch=流水线批量（默认）| interactive=人在等（详情页等交互操作）
+    # 同一资源类内 interactive 优先于 batch 派发（见 queue.RESOURCE_CLASS）。
+    lane = Column(
+        String(20), default="batch", nullable=False, index=True,
+        comment="派发泳道：batch/interactive",
+    )
+    # 入队/重新入队时刻：排序键，保证「失败重试排到最后」。
+    # 重试时刷新为当前时间，同优先级下自然排到队尾（见 queue._claim_and_dispatch）。
+    queued_at = Column(DateTime(timezone=True), nullable=True, comment="入队时刻(排序键)")
     # 重试次数
     attempts = Column(Integer, default=0, comment="已尝试次数")
     # 每次尝试的历史（JSON 数组：[{attempt, at, ok, error}]，供任务列表"进度/日志"展示；
@@ -45,6 +54,10 @@ class Job(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     started_at = Column(DateTime(timezone=True), nullable=True, comment="开始执行时间")
+    # 心跳：执行期间由 _heartbeat_worker 每 heartbeat_interval 秒刷新。
+    # 状态机最后一环「running ->(超时)-> failed」依赖它判定：进程崩溃、上游挂起、
+    # 视频生成卡死都会留下永久 running，没有心跳就无法与"正常慢"区分。
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True, comment="执行心跳(超时判定用)")
     finished_at = Column(DateTime(timezone=True), nullable=True, comment="结束时间")
 
     def __repr__(self):
