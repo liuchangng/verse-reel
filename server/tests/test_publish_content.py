@@ -1,7 +1,7 @@
 """Q3 守护测试：按需 LLM 平台发布文案生成（publisher.generate_platform_copy）
 
 覆盖（2026-09-10 Q3「B 方案 LLM + 按平台分块 + 查看时按需生成」）：
-- 各平台字段规范表齐全（抖音/小红书/快手）
+- 各平台字段规范表齐全（抖音/小红书/快手/B站/YouTube）
 - JSON 安全解析降级（markdown 包裹 / 前后杂质 / 裸控制字符 / 彻底坏 → {}）
 - 缓存键契约（同 script+platforms 同键；script 变键变；platforms 无序同键）
 - 无 script → 直接规则版（generated=False），只含已定义规范平台
@@ -30,8 +30,11 @@ def svc():
 
 
 # ---------- 平台规范表 ----------
-def test_specs_covers_three_platforms():
-    assert set(PLATFORM_COPY_SPECS) == {"douyin", "xiaohongshu", "kuaishou"}
+def test_specs_covers_supported_platforms():
+    # 文案规范表覆盖全部输出平台（抖/红/快 + B站/YouTube）
+    assert set(PLATFORM_COPY_SPECS) == {
+        "douyin", "xiaohongshu", "kuaishou", "bilibili", "youtube",
+    }
     for p, s in PLATFORM_COPY_SPECS.items():
         assert s["title_max"] > s["title_min"] > 0
         assert s["tag_count"]
