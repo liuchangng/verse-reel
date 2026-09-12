@@ -343,13 +343,15 @@ async def queue_status(token: str = Depends(require_token)):
 
 
 def _throttle_snapshot() -> dict:
-    """4 个限流器的当前使用快照（D4 节流内核可观测性）。"""
+    """各限流器的当前使用快照（D4 节流内核可观测性；含文本交互式泳道）。"""
     from app.services.rate_limiter import (
-        text_limiter, image_1k_limiter, image_high_limiter, video_limiter,
+        text_limiter, text_limiter_interactive,
+        image_1k_limiter, image_high_limiter, video_limiter,
     )
     return {
         l.name: l.snapshot()
-        for l in (text_limiter, image_1k_limiter, image_high_limiter, video_limiter)
+        for l in (text_limiter, text_limiter_interactive,
+                  image_1k_limiter, image_high_limiter, video_limiter)
     }
 
 

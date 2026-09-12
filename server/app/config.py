@@ -273,6 +273,10 @@ class Settings(BaseSettings):
     # ====== 模型限流配置（RPM 滑动窗口；原硬编码移入设置随 overlay 热更）======
     # 建议取官方限值 × 0.9 留 headroom；视频官方 1 次/分钟不打折。
     text_rpm: int = Field(default=18)
+    # 交互式文本泳道预留配额（RPM）：从 text_rpm 中切出，供"人在等"的操作
+    # （热点页按需推荐等）优先使用；批量泳道只吃 text_rpm - 本值，避免交互操作
+    # 在批量跑满时被队头饿死。0 = 不预留（交互与批量共用同一额度）。
+    text_rpm_interactive: int = Field(default=4)
     image_1k_rpm: int = Field(default=18)
     image_high_rpm: int = Field(default=8)   # 2K/3K 高分辨率档
     video_rpm: int = Field(default=1)

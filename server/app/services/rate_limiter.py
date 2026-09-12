@@ -75,10 +75,16 @@ class RateLimiter:
 
         Args:
             timeout: 最长等待秒数；None 表示不限。返回 False 表示超时。
+
+        修复（2026-09-12）：旧版在 ``async with self._lock`` 内部 ``await sleep(wait)``
+        —— 锁被持有整个等待期，其余请求全部被队头阻塞（18 RPM 下第 20 个请求需等
+        约 66s，且期间无人能进入临界区判定）。改为：**只在临界区内判定/记录，释放
+        锁后再 sleep**，醒来重新竞争。等待者并发排队、各自按最新窗口重判，
+        队头阻塞消除。
         """
         deadline = (time.monotonic() + timeout) if timeout is not None else None
-        async with self._lock:
-            while True:
+        while True:
+            async with self._lock:
                 now = time.monotonic()
                 # 把超过窗口的命中滑出
                 while self._hits and (now - self._hits[0]) >= self.window_sec:
@@ -92,14 +98,11 @@ class RateLimiter:
                     return True
                 # 还在限：等到最早那个离开窗口
                 wait = self.window_sec - (now - self._hits[0])
-                self.wait_count += 1
-                # 释放锁让别人能 continue / 也能进入 acquire
-                # ⚠️ 这里简单做法是释放锁再睡 —— 期间可能有别人超车导致
-                # 本次依旧 wait 较短时间。OK：相当于"窗口"近似，未严格。
                 if deadline is not None and (deadline - time.monotonic()) < wait:
                     return False
-                # 让出锁 sleep 早一点点
-                await asyncio.sleep(max(wait, 0.05))
+            # 锁已释放：并发等待，互不阻塞；醒来回循环按最新窗口重判
+            self.wait_count += 1
+            await asyncio.sleep(max(min(wait, self.window_sec), 0.05))
 
     def record_429(self) -> None:
         """上游返回 429/限流时调用：记录失败但不提前释放配额（保守）。"""
@@ -122,10 +125,24 @@ class RateLimiter:
 
 
 # ---- 全局实例（按类型分配；90% 官方限值的初始值，rpm_getter 实时读设置热更）----
-# 文本：官方 30 RP0，实际 20 → 18
+# 文本总量：官方 30 RPO，实际 20 → 18。其中切出 interactive 预留给"人在等"的
+# 交互式泳道，批量泳道只吃剩余额度 —— 两泳道合计不超过 text_rpm，既不超上游，
+# 又保证交互操作不被批量饿死（2026-09-12 泳道隔离）。
+def _batch_text_rpm() -> int:
+    """批量文本泳道可用 RPM = text_rpm - 交互预留（下限 1）。"""
+    total = int(getattr(settings, "text_rpm", 18))
+    reserved = int(getattr(settings, "text_rpm_interactive", 4))
+    return max(1, total - max(0, reserved))
+
+
 text_limiter = RateLimiter(
-    rpm=18, name="text",
-    rpm_getter=lambda: getattr(settings, "text_rpm", 18),
+    rpm=14, name="text",
+    rpm_getter=_batch_text_rpm,
+)
+# 交互式文本泳道：预留配额（默认 4 RPM），用于热点页按需推荐等人在等的操作。
+text_limiter_interactive = RateLimiter(
+    rpm=4, name="text-interactive",
+    rpm_getter=lambda: max(1, int(getattr(settings, "text_rpm_interactive", 4))),
 )
 # 图片 1K：官方 30，实际 20 → 18
 image_1k_limiter = RateLimiter(
@@ -159,9 +176,25 @@ def get_image_limiter(size: str | None) -> RateLimiter:
     return image_1k_limiter
 
 
+# 泳道 → 文本限流器：batch=批量流水线（script/publish_copy 等），
+# interactive=人在等的按需操作（热点页推荐）。agnes_client.generate_text(lane=...) 消费。
+TEXT_LIMITER_BY_LANE = {
+    "batch": text_limiter,
+    "interactive": text_limiter_interactive,
+}
+
+
+def get_text_limiter(lane: str | None) -> RateLimiter:
+    """按泳道取文本限流器；未知/空泳道回退 batch（默认口径）。"""
+    return TEXT_LIMITER_BY_LANE.get((lane or "batch").lower(), text_limiter)
+
+
 __all__ = [
     "RateLimiter",
     "text_limiter",
+    "text_limiter_interactive",
+    "TEXT_LIMITER_BY_LANE",
+    "get_text_limiter",
     "image_1k_limiter",
     "image_high_limiter",
     "video_limiter",

@@ -432,6 +432,7 @@ class HotspotService:
                 raw = await agnes_client.generate_text(
                     [{"role": "user", "content": _LLM_FILTER_PROMPT + numbered}],
                     max_tokens=300,
+                    lane="interactive",  # 热点页按需拉取（人在等）→ 走预留配额
                 )
                 keep = _parse_llm_filter_reply(raw, len(titles))
                 if keep is None:
@@ -1077,7 +1078,9 @@ class HotspotService:
         ]
 
         try:
-            raw = await agnes_client.generate_text(messages, max_tokens=800)
+            raw = await agnes_client.generate_text(
+                messages, max_tokens=800, lane="interactive"
+            )
             data = self._parse_llm_json(raw)
             return self._hydrate_candidates(data, candidates)
         except Exception as e:
