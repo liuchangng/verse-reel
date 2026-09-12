@@ -13,6 +13,9 @@ env/
 
 # start.bat 生成的临时服务脚本
 .run/
+# 端口探测/进程号临时文件（start.bat 运行期生成）
+.portcheck.txt
+.portpid.txt
 
 # Database
 *.db
@@ -101,9 +104,6 @@ server/scripts/repro_*.py
 server/scripts/test_*.py
 server/scripts/verify_*.py
 # === end 一次性调试产物 ===
-
-# CosyVoice 本体（git clone --recursive 的第三方仓库，含子模块，不进项目库）
-server/third_party/
 
 # CosyVoice 本体（git clone --recursive 的第三方仓库，含子模块，不进项目库）
 server/third_party/
