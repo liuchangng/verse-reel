@@ -445,14 +445,31 @@ const derivedVideoStatus = computed(() => {
 import { formatDateTime as formatTime } from '../utils/time'
 
 // ====== 多平台成片 ======
-// task.platform_outputs 为 JSON map: {platform: url}；video_url 作主平台兜底
+// task.platform_outputs 为 JSON map: {platform: url}；video_url 作主平台兜底。
+// 2026-09-13 修复（红框空白 + 问号根因）：t.platform 历史上可能存成逗号串
+// （如 "douyin,bilibili"），旧版直接 map[t.platform]=url 把整个串当一个平台 key，
+// 导致 PLAT_INFO 查不到 → ratio='?'、copyByPlatform[串] 取不到 → 文案块空白。
+// 现把逗号串拆成单平台，每平台共用同一份 video_url（主视频按比例分组展示）。
 const platformVideos = computed(() => {
   const t = task.value
   const map = {}
   if (t.platform_outputs) {
-    try { Object.assign(map, JSON.parse(t.platform_outputs)) } catch (e) {}
+    try {
+      const po = JSON.parse(t.platform_outputs)
+      for (const [k, v] of Object.entries(po)) {
+        // platform_outputs 的 key 也可能是逗号串，统一拆分
+        for (const p of String(k).split(',').map(s => s.trim()).filter(Boolean)) {
+          if (v && !(p in map)) map[p] = v
+        }
+      }
+    } catch (e) {}
   }
-  if (t.video_url && !(t.platform in map)) map[t.platform || 'douyin'] = t.video_url
+  if (t.video_url) {
+    const plats = String(t.platform || 'douyin').split(',').map(s => s.trim()).filter(Boolean)
+    for (const p of plats.length ? plats : ['douyin']) {
+      if (!(p in map)) map[p] = t.video_url
+    }
+  }
   return map
 })
 const hasVideos = computed(() => Object.keys(platformVideos.value).length > 0)
