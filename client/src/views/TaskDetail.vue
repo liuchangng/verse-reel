@@ -233,38 +233,43 @@
                  不阻止内部绑定求值，copyByPlatform[p] 为 undefined 时内层
                  .generated/.title/.tags 表达式直接抛 TypeError → 渲染崩 → 白屏。
                  v-if 为 falsy 时整块不创建 DOM，内部表达式全部不执行，根治。 -->
-            <div
-              v-for="p in g.platformIds"
-              :key="p"
-              class="copy-block"
-              v-if="copyByPlatform[p]"
-            >
-              <div class="copy-block-head">
-                <span class="copy-plat">{{ PLAT_INFO[p] ? PLAT_INFO[p].name : p }}</span>
-                <span class="copy-gen" v-if="copyByPlatform[p].generated">AI生成</span>
+            <!-- 2026-09-13 修复（p undefined 警告）：v-for 与 v-if 不能同元素。
+                 Vue 模板编译中 v-if 先于 v-for 求值，copyByPlatform[p] 里的 p 在
+                 迭代变量绑定前已被访问 → "[Vue warn] Property p was accessed during
+                 render but is not defined on instance"。用 <template v-for> 外层循环、
+                 内层 div 再做 v-if，保证 p 在 v-if 表达式中始终有定义。 -->
+            <template v-for="p in g.platformIds" :key="p">
+              <div
+                class="copy-block"
+                v-if="copyByPlatform[p]"
+              >
+                <div class="copy-block-head">
+                  <span class="copy-plat">{{ PLAT_INFO[p] ? PLAT_INFO[p].name : p }}</span>
+                  <span class="copy-gen" v-if="copyByPlatform[p].generated">AI生成</span>
+                </div>
+                <div class="copy-field" v-if="copyByPlatform[p].title">
+                  <span class="copy-field-label">标题</span>
+                  <span class="copy-field-val">{{ copyByPlatform[p].title }}</span>
+                  <button class="copy-btn" @click="copyField(p,'title')" title="复制标题">📋</button>
+                </div>
+                <div class="copy-field" v-if="copyByPlatform[p].description">
+                  <span class="copy-field-label">描述</span>
+                  <span class="copy-field-val">{{ copyByPlatform[p].description }}</span>
+                  <button class="copy-btn" @click="copyField(p,'description')" title="复制描述">📋</button>
+                </div>
+                <div class="copy-field" v-if="copyByPlatform[p].tags && copyByPlatform[p].tags.length">
+                  <span class="copy-field-label">话题</span>
+                  <span class="copy-field-val copy-tags">
+                    <span v-for="t in copyByPlatform[p].tags" :key="t" class="copy-tag">{{ t.startsWith('#') ? t : '#' + t }}</span>
+                  </span>
+                  <button class="copy-btn" @click="copyField(p,'tags')" title="复制话题">📋</button>
+                </div>
+                <!-- 该平台有文案但所有字段都空时，显示占位提示（避免空卡片） -->
+                <div v-if="!(copyByPlatform[p].title || copyByPlatform[p].description || (copyByPlatform[p].tags && copyByPlatform[p].tags.length))" class="copy-field-empty">
+                  <span class="copy-field-label">暂无发布文案</span>
+                </div>
               </div>
-              <div class="copy-field" v-if="copyByPlatform[p].title">
-                <span class="copy-field-label">标题</span>
-                <span class="copy-field-val">{{ copyByPlatform[p].title }}</span>
-                <button class="copy-btn" @click="copyField(p,'title')" title="复制标题">📋</button>
-              </div>
-              <div class="copy-field" v-if="copyByPlatform[p].description">
-                <span class="copy-field-label">描述</span>
-                <span class="copy-field-val">{{ copyByPlatform[p].description }}</span>
-                <button class="copy-btn" @click="copyField(p,'description')" title="复制描述">📋</button>
-              </div>
-              <div class="copy-field" v-if="copyByPlatform[p].tags && copyByPlatform[p].tags.length">
-                <span class="copy-field-label">话题</span>
-                <span class="copy-field-val copy-tags">
-                  <span v-for="t in copyByPlatform[p].tags" :key="t" class="copy-tag">{{ t.startsWith('#') ? t : '#' + t }}</span>
-                </span>
-                <button class="copy-btn" @click="copyField(p,'tags')" title="复制话题">📋</button>
-              </div>
-              <!-- 该平台有文案但所有字段都空时，显示占位提示（避免空卡片） -->
-              <div v-if="!(copyByPlatform[p].title || copyByPlatform[p].description || (copyByPlatform[p].tags && copyByPlatform[p].tags.length))" class="copy-field-empty">
-                <span class="copy-field-label">暂无发布文案</span>
-              </div>
-            </div>
+            </template>
             <div v-if="copyLoading && !Object.keys(copyByPlatform).length" class="copy-block-loading">
               <i></i> 正在生成各平台发布文案…
             </div>
