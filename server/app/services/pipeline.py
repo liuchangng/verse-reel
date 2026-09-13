@@ -361,15 +361,22 @@ class PipelineEngine:
                 style=style,
                 character_description=task.character_description,
             )
-            if image_urls:
-                task.image_urls = json.dumps(image_urls, ensure_ascii=False)
-                # 落盘：image 阶段把远程图下载到本地并持久化路径，合成阶段优先读本地，
-                # 彻底摆脱对 agnes CDN 可达性的依赖（2026-09-13 根因修复）
-                local_paths = await self._persist_images_local(task, image_urls)
-                if local_paths:
-                    task.image_local_paths = json.dumps(local_paths, ensure_ascii=False)
-                if not task.image_score:
-                    task.image_score = 8
+            if not image_urls:
+                # 2026-09-13 修复（subtitle-image-align 上游）：CDN 不可达/全部评分未过会
+                # 返回空列表，旧版静默跳过写库，任务继续进入 tts/subtitle 后以"缺图 0 出片"
+                # 失败且错误定位困难。fail-loud：缺分镜图即在此终止，原因可见。
+                task.status = "failed"
+                task.error_message = "分镜图生成失败（image 阶段返回 0 张），已终止以免下游缺图 0 出片"
+                await db.commit()
+                raise RuntimeError(task.error_message)
+            task.image_urls = json.dumps(image_urls, ensure_ascii=False)
+            # 落盘：image 阶段把远程图下载到本地并持久化路径，合成阶段优先读本地，
+            # 彻底摆脱对 agnes CDN 可达性的依赖（2026-09-13 根因修复）
+            local_paths = await self._persist_images_local(task, image_urls)
+            if local_paths:
+                task.image_local_paths = json.dumps(local_paths, ensure_ascii=False)
+            if not task.image_score:
+                task.image_score = 8
             await db.commit()
             logger.info(f"task{task_id} image 阶段完成: {len(image_urls)} 张")
 
@@ -781,12 +788,18 @@ class PipelineEngine:
                 storyboard_json = storyboard_json.split("```")[1].split("```")[0]
             
             data = json.loads(storyboard_json.strip())
+            # 2026-09-13 修复（storyboard-empty-guard）：LLM 可能返回「合法 JSON 的空列表」
+            # "[]"——旧版仅捕获 json.JSONDecodeError，空列表会静默透传，导致 storyboard 为空、
+            # image/tts/subtitle 全链"缺少前置 storyboard"失败（task_26 级联失败根因）。
+            # 空列表与解析失败同等处理：降级为档位化默认分镜，保证下游必有镜可生成。
+            if not isinstance(data, list) or len(data) == 0:
+                raise ValueError("storyboard 为空或非法（LLM 返回 []）")
             # 兜底：确保每镜有 narration（逐镜以图定音的核心字段）
             for it in data:
                 if not it.get("narration"):
                     it["narration"] = it.get("description", "")
             return data
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             # 返回档位化默认分镜（S 7 镜 ≈ 6–9 中值 / L 18 镜 ≈ 14–22 中值，镜长按档）
             prof = tier_profile(tier)
             n = max(1, (prof["shots_min"] + prof["shots_max"]) // 2)
@@ -1453,28 +1466,43 @@ class PipelineEngine:
             ff = settings.ffmpeg_path
             output_dir = Path(settings.output_dir) / f"task_{task.id}"
             output_dir.mkdir(parents=True, exist_ok=True)
-            # 确保本地分镜图存在（按 img_{index}.png 命名，对应镜序）
+            # best-effort：CDN 不可达时本函数会跳过并显式报错（fail-loud）；
+            # 合成仍以磁盘 img_*.png 为准（见下方按镜序配对，自愈于本地落盘图）。
             await self._download_storyboard_images(task, output_dir)
+
             segs = tts_segments.get("segments", [])
+
+            def _find_img(j: int) -> Path | None:
+                """按镜序 j 找本地分镜图：优先水印图，其次原图，最后磁盘扫描同镜序号兜底
+                （兼容历史 jpg/webp 命名）。2026-09-13 修复（subtitle-image-align）：
+                合成以磁盘 img_*.png 为准、自愈于本地落盘图，彻底摆脱对 agnes CDN 实时
+                可达性的依赖，且不再因旧分段 index/命名错位而 0 出片。"""
+                wm = output_dir / f"img_{j}_wm.png"
+                if wm.exists():
+                    return wm
+                base = output_dir / f"img_{j}.png"
+                if base.exists():
+                    return base
+                for suf in (".jpg", ".jpeg", ".webp"):
+                    cand = output_dir / f"img_{j}{suf}"
+                    if cand.exists():
+                        return cand
+                return None
+
             pairs = []
             for s in segs:
-                # 优先用已叠加水印的分镜图（_wm.png），否则退回原图
-                wm = output_dir / f"img_{s['index']}_wm.png"
-                img = wm if wm.exists() else output_dir / f"img_{s['index']}.png"
-                aud = Path(s["path"])
-                if img.exists() and aud.exists():
+                j = s.get("index")
+                img = _find_img(j) if j is not None else None
+                aud = Path(s.get("path", ""))
+                if img and img.exists() and aud.exists() and aud.stat().st_size > 0:
                     pairs.append((s, str(img), str(aud)))
             if not pairs:
-                # 诊断信息：区分"分镜图下载失败"与"TTS 音频缺失"，便于定位 0 出片根因
-                n_img_local = sum(
-                    1 for s in segs
-                    if (output_dir / f"img_{s['index']}.png").exists()
-                    or (output_dir / f"img_{s['index']}_wm.png").exists()
-                )
+                # 诊断：区分"分镜图缺失"与"TTS 音频缺失"，便于定位 0 出片根因
+                n_img = sum(1 for s in segs if _find_img(s.get("index")) is not None)
                 n_aud = sum(1 for s in segs if Path(s.get("path", "")).exists())
                 logger.error(
                     f"task{task.id} 逐镜合成无可用的(图,音频)对: "
-                    f"分镜图本地可用 {n_img_local}/{len(segs)}，音频本地可用 {n_aud}/{len(segs)}"
+                    f"分镜图本地可用 {n_img}/{len(segs)}，音频本地可用 {n_aud}/{len(segs)}"
                 )
                 return {"ok": False}
             seg_files = []
