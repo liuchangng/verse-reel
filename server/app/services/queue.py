@@ -297,12 +297,12 @@ def _task_produced(task: Task) -> dict[str, bool]:
         "script": _nonempty(task.script),
         # character: 定妆照锚点
         "character": _nonempty(getattr(task, "character_ref", None)),
-        # image: 只看分镜图本身。2026-09-09 任务001死循环事故：旧版写成
-        # ``image_urls or character_ref``，定妆照在而分镜图空时 image 被
-        # 误判"已产出"，_expand_prereqs 永不补建 image → video 三连失败
-        # "缺分镜图" → 重试同一循环永无出口。character 阶段只写
-        # character_ref，image_urls 是 image 阶段独有产物，不可混判。
-        "image": _nonempty(task.image_urls),
+    # image: 分镜图就绪 = CDN URL + 本地落盘都到位。2026-09-13 修复（t56 并发竞态）：
+    # image 阶段一落库（CDN URL 写入 image_urls）即非空，但本地 img_*.png 由
+    # _persist_images_local 异步下载，尚未完成 → 合成 _download_storyboard_images
+    # 取图 0/6。image_local_paths 仅在落盘完成后才写入，是"合成可取图"的准确标志。
+    # AND 语义（非 OR）：只写 URL 没落盘 = 未就绪；只落盘没 URL = 数据不一致也未就绪。
+    "image": _nonempty(task.image_urls) and _nonempty(getattr(task, "image_local_paths", None)),
         "tts": _nonempty(getattr(task, "audio_url", None)),
         "video": _nonempty(getattr(task, "video_url", None)),
         "subtitle": _nonempty(getattr(task, "subtitle_url", None)),

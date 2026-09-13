@@ -74,6 +74,30 @@ def test_task_produced_image_requires_image_urls():
     assert produced["character"] is True
 
 
+def test_task_produced_image_requires_local_persisted():
+    """2026-09-13 t56 并发竞态回归：image_local_paths 为空（本地未落盘）时，
+    即便 image_urls 已有 CDN URL，subtitle 的合成取图仍会 0/6 失败 →
+    必须把 image 判定为未产出，_deps_satisfied 不应放行 subtitle。
+    """
+    task = Task(id=1, poem_id=1, platform="douyin",
+                character_ref="http://img/char.png",
+                image_urls='["http://cdn/0.png"]',
+                image_local_paths=None)  # 本地 img_*.png 尚未下载完成
+    produced = _task_produced(task)
+    assert produced["image"] is False, "本地未落盘时 image 不得视为合成就绪"
+
+
+def test_task_produced_image_local_paths_satisfies():
+    """image_local_paths 非空（本地落盘完成）→ image 视为已产出，
+    subtitle 可放行（合成 _download_storyboard_images 会优先读本地）。"""
+    task = Task(id=1, poem_id=1, platform="douyin",
+                character_ref="http://img/char.png",
+                image_urls='["http://cdn/0.png"]',
+                image_local_paths='["task_1/img_0.png"]')
+    produced = _task_produced(task)
+    assert produced["image"] is True, "本地落盘完成时 image 必须视为已产出"
+
+
 def test_expand_prereqs_backfills_image_for_video(monkeypatch):
     """重新生成 video 而分镜图缺失时，入队必须自动补建 image（死循环出口）。
 
