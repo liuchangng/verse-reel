@@ -213,10 +213,10 @@
     <div class="section-card" v-if="hasVideos">
       <div class="section-header">
         <div class="section-title">🎬 视频预览</div>
-        <span class="video-meta">{{ videoGroupsByRatio.length }} 个不同比例成片{{ task.video_duration ? ` · ${task.video_duration}秒` : '' }}</span>
+        <span class="video-meta">{{ videoGroupsByRatio.items.length }} 个不同比例成片{{ videoGroupsByRatio.items[0] && videoGroupsByRatio.items[0].duration ? ` · ${videoGroupsByRatio.items[0].duration}秒` : '' }}</span>
       </div>
       <div class="video-grid">
-        <div class="video-card" v-for="g in videoGroupsByRatio" :key="g.ratio">
+        <div class="video-card" v-for="g in videoGroupsByRatio.items" :key="g.ratio">
           <div class="video-card-head">
             <div class="video-card-title">
               <span class="plat-badge">{{ g.label }}</span>
@@ -273,6 +273,20 @@
             <div v-if="copyLoading && !Object.keys(copyByPlatform).length" class="copy-block-loading">
               <i></i> 正在生成各平台发布文案…
             </div>
+          </div>
+        </div>
+        <!-- 多平台成片 REQ-M6：部分平台失败时展示失败原因（不静默丢弃） -->
+        <div class="video-card video-card-failed" v-for="f in videoGroupsByRatio.failedGroups" :key="'failed-' + f.platform">
+          <div class="video-card-head">
+            <div class="video-card-title">
+              <span class="plat-badge plat-badge-failed">{{ PLAT_INFO[f.platform] ? PLAT_INFO[f.platform].name : f.platform }}</span>
+              <span class="plat-ratio" v-if="f.ratio">{{ f.ratio }}</span>
+              <span class="plat-status-failed">生成失败</span>
+            </div>
+          </div>
+          <div class="video-card-failed-body">
+            <span class="failed-icon">⚠️</span>
+            <span class="failed-text">{{ f.error }}</span>
           </div>
         </div>
       </div>
@@ -450,34 +464,42 @@ const derivedVideoStatus = computed(() => {
 import { formatDateTime as formatTime } from '../utils/time'
 
 // ====== 多平台成片 ======
-// task.platform_outputs 为 JSON map: {platform: url}；video_url 作主平台兜底。
-// 2026-09-13 修复（红框空白 + 问号根因）：t.platform 历史上可能存成逗号串
-// （如 "douyin,bilibili"），旧版直接 map[t.platform]=url 把整个串当一个平台 key，
-// 导致 PLAT_INFO 查不到 → ratio='?'、copyByPlatform[串] 取不到 → 文案块空白。
-// 现把逗号串拆成单平台，每平台共用同一份 video_url（主视频按比例分组展示）。
+// task.platform_outputs 有两种形态（API 返回已归一化为 entry 对象，旧数据可能是 URL 字符串）：
+//   - entry 对象（REQ-M5 结构化）：{platform: {url?, ratio, duration?, status, error?}}
+//   - 旧 URL 字符串（兼容）：{platform: "http://..."}
+// 成功平台取 url/ratio/duration；失败平台 entry.status=failed 时展示失败原因卡片。
+const _isEntryObject = (v) => v && typeof v === 'object' && (v.url !== undefined || v.status === 'failed')
 const platformVideos = computed(() => {
   const t = task.value
-  const map = {}
-  if (t.platform_outputs) {
-    try {
-      const po = JSON.parse(t.platform_outputs)
-      for (const [k, v] of Object.entries(po)) {
-        // platform_outputs 的 key 也可能是逗号串，统一拆分
-        for (const p of String(k).split(',').map(s => s.trim()).filter(Boolean)) {
-          if (v && !(p in map)) map[p] = v
+  const map = {}   // platform -> { url?, ratio?, duration?, failed?, error? }
+  if (t.platform_outputs && Object.keys(t.platform_outputs).length) {
+    for (const [k, v] of Object.entries(t.platform_outputs)) {
+      // key 历史上可能是逗号串，统一拆分
+      for (const p of String(k).split(',').map(s => s.trim()).filter(Boolean)) {
+        if (p in map) continue
+        if (_isEntryObject(v)) {
+          // entry 对象：成功取 url/ratio/duration；失败记 error
+          if (v.status === 'failed' || !v.url) {
+            map[p] = { failed: true, error: v.error || '未知原因', ratio: v.ratio || PLAT_INFO[p]?.ratio }
+          } else {
+            map[p] = { url: v.url, ratio: v.ratio || PLAT_INFO[p]?.ratio, duration: v.duration, failed: false }
+          }
+        } else if (typeof v === 'string' && v) {
+          // 旧 URL 字符串：包成成功 entry
+          map[p] = { url: v, ratio: PLAT_INFO[p]?.ratio, failed: false }
         }
       }
-    } catch (e) {}
+    }
   }
   if (t.video_url) {
     const plats = String(t.platform || 'douyin').split(',').map(s => s.trim()).filter(Boolean)
     for (const p of plats.length ? plats : ['douyin']) {
-      if (!(p in map)) map[p] = t.video_url
+      if (!(p in map)) map[p] = { url: t.video_url, ratio: PLAT_INFO[p]?.ratio, failed: false }
     }
   }
   return map
 })
-const hasVideos = computed(() => Object.keys(platformVideos.value).length > 0)
+const hasVideos = computed(() => videoGroupsByRatio.value.items.length > 0)
 // 平台展示信息（名称 + 比例），与 PLATFORM_CONFIG 保持一致
 const PLAT_INFO = {
   douyin: { name: '抖音', ratio: '9:16' },
@@ -490,24 +512,38 @@ const platformName = (p) => (PLAT_INFO[p] && PLAT_INFO[p].name) || p
 const platformRatio = (p) => (PLAT_INFO[p] && PLAT_INFO[p].ratio) || '-'
 // 按比例分组：相同画幅的平台共用一个预览卡片，标题用平台名"/"拼接（如"抖音/快手"）
 // 避免同源视频重复展示；不同比例（如 9:16 与 16:9）独立卡片以呈现裁剪差异
+// 2026-09-14 多平台成片 REQ-M6：platformVideos 值升级为 entry 对象 {url?, failed?, error?, ratio?, duration?}；
+// 失败平台（entry.failed）不参与比例分组（无成片可预览），单独收集到 failedGroups 展示原因卡片。
 const videoGroupsByRatio = computed(() => {
-  const groups = new Map()  // ratio -> { ratio, platformIds:[], names:[], url }
-  for (const [plat, url] of Object.entries(platformVideos.value)) {
+  const groups = new Map()   // ratio -> { ratio, platformIds:[], names:[], url, duration? }
+  const failedGroups = []    // 失败平台：{ platform, ratio, error }
+  for (const [plat, entry] of Object.entries(platformVideos.value)) {
+    if (entry.failed) {
+      failedGroups.push({ platform: plat, ratio: entry.ratio, error: entry.error })
+      continue
+    }
+    if (!entry.url) continue   // 无成片 URL 不参与预览分组
     const info = PLAT_INFO[plat] || { name: plat, ratio: '?' }
-    const ratio = info.ratio
+    const ratio = entry.ratio || info.ratio
     if (!groups.has(ratio)) {
-      groups.set(ratio, { ratio, platformIds: [plat], names: [info.name], url })
+      groups.set(ratio, { ratio, platformIds: [plat], names: [info.name], url: entry.url, duration: entry.duration })
     } else {
       const g = groups.get(ratio)
       if (!g.platformIds.includes(plat)) { g.platformIds.push(plat); g.names.push(info.name) }
+      // 组内同比例共享一份成片，duration 取第一个非空值
+      if (g.duration == null && entry.duration != null) g.duration = entry.duration
     }
   }
-  return Array.from(groups.values()).map(g => ({
-    ratio: g.ratio,
-    label: g.names.join('/'),
-    platformIds: g.platformIds,   // 组内平台 id（供按需请求各平台文案）
-    url: withOutputToken(g.url),
-  }))
+  return {
+    items: Array.from(groups.values()).map(g => ({
+      ratio: g.ratio,
+      label: g.names.join('/'),
+      platformIds: g.platformIds,   // 组内平台 id（供按需请求各平台文案）
+      url: withOutputToken(g.url),
+      duration: g.duration,
+    })),
+    failedGroups,
+  }
 })
 
 // ====== 操作 ======
@@ -529,7 +565,7 @@ const copyLoading = ref(false)
 const requestedPlatforms = ref(new Set())   // 已请求过的平台，防重复
 const copyPlatforms = computed(() => {
   const ids = []
-  for (const g of videoGroupsByRatio.value) {
+  for (const g of videoGroupsByRatio.value.items) {
     for (const p of g.platformIds) if (!ids.includes(p)) ids.push(p)
   }
   return ids
@@ -861,6 +897,15 @@ onUnmounted(() => cleanup())
 .video-card { border: 1px solid var(--color-border-light); border-radius: var(--radius-md); overflow: hidden; background: var(--color-bg); }
 .video-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--color-border-light); }
 .video-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+/* 多平台成片 REQ-M6：失败平台卡片 */
+.video-card-failed { border: 1px dashed var(--color-border-light); }
+.video-card-failed .video-card-head { border-bottom: none; }
+.plat-badge-failed { background: rgba(217,105,6,.1); color: #d9690a; border: 1px solid rgba(217,105,6,.35); }
+.plat-status-failed { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: var(--radius-full); background: rgba(217,105,6,.12); color: #d9690a; }
+.video-card-failed-body { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px 14px; }
+.failed-icon { flex-shrink: 0; }
+.failed-text { font-size: 12px; line-height: 1.5; color: var(--color-text-secondary, #666); word-break: break-word; }
 
 /* Q3：视频卡片下方"按平台分块"的发布文案块 */
 .video-copy-blocks { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; background: var(--color-bg); }

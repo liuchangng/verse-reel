@@ -25,6 +25,12 @@ from app.services.hotspot import hotspot_service
 from app.services.prompt_optimizer import prompt_optimizer, normalize_style
 from app.services.character import character_service
 from app.services.publisher import publisher_service
+from app.services.platform_outputs import (
+    OK,
+    FAILED,
+    serialize_platform_outputs,
+    primary_video_url,
+)
 from app.config import settings, tier_of, resolve_task_tier, tier_script_guidelines, tier_profile
 
 logger = logging.getLogger(__name__)
@@ -435,13 +441,19 @@ class PipelineEngine:
             if not platform_urls:
                 raise RuntimeError("视频片段合成失败（所有比例组均未产出成片）")
             # 3) 主平台成片 → video_url/subtitle_url；多平台时全量写 platform_outputs
+            #    （2026-09-14 多平台成片 REQ-M1/M2：渲染层已返回 entry 对象，
+            #    失败 entry 不再静默丢弃；URL 取值走契约层 primary_video_url，
+            #    序列化走契约层 serialize_platform_outputs，单一事实源）
             primary_plat = task.platform or "douyin"
-            task.subtitle_url = platform_urls.get(primary_plat,
-                                                 list(platform_urls.values())[0])
+            primary_url = primary_video_url(platform_urls, primary_plat)
+            if not primary_url:
+                # 有平台被尝试渲染但全部失败 → fail-loud（原因见渲染层日志）
+                raise RuntimeError("视频片段合成失败（所有比例组均未产出成片）")
+            task.subtitle_url = primary_url
             # 展示视频同样指向完整成片（覆盖 agnes 5s 片段）
             task.video_url = task.subtitle_url
             if len(platform_urls) > 1:
-                task.platform_outputs = json.dumps(platform_urls, ensure_ascii=False)
+                task.platform_outputs = serialize_platform_outputs(platform_urls)
             await db.commit()
 
         elif stage == "publish_copy":
@@ -616,12 +628,15 @@ class PipelineEngine:
             task.review_status = "pending"
             # 最终对外视频必须是同步旁白的完整幻灯片(final.mp4)，而非 agnes 5s 片段。
             # 多平台模式：主平台 URL 作为 video_url，其余存 platform_outputs JSON。
+            # 2026-09-14 多平台成片 REQ-M1/M2：渲染层返回 entry 对象（{plat: {url?,
+            # ratio, duration?, status, error?}}），URL 取值与落库序列化统一走
+            # platform_outputs 契约层（单一事实源，成功/失败 entry 全量写入）。
             primary_plat = task.platform or "douyin"
-            if platform_urls:
-                task.video_url = platform_urls.get(primary_plat,
-                                                  list(platform_urls.values())[0])
+            primary_url = primary_video_url(platform_urls, primary_plat)
+            if primary_url:
+                task.video_url = primary_url
                 if len(platform_urls) > 1:
-                    task.platform_outputs = json.dumps(platform_urls, ensure_ascii=False)
+                    task.platform_outputs = serialize_platform_outputs(platform_urls)
             await db.commit()
             
             logger.info(f"✅ 流水线待审核: 任务 {task_id} - {poem.title}（pending_review, 进度 95%）")
@@ -638,6 +653,14 @@ class PipelineEngine:
         """本任务显式发布平台（task.platforms JSON）；为空回退 settings.output_platforms。
 
         与渲染段共用同一解析（video-comm 决策 1：文案链按任务平台解析档位）。
+
+        兼容旧数据（2026-09-14 多平台成片 REQ-M1 存量升级）：早期任务把多平台以逗号串
+        存于 ``task.platform``（如 ``"douyin,bilibili"``），``task.platforms`` 未填。
+        此时按逗号拆分取其真实目标平台，避免回退到全局默认平台列表导致重渲染出的
+        平台与任务实际不符（存量任务重跑 subtitle 拿不到各平台独立成片）。
+
+        仅当 ``task.platform`` 确实含逗号时才走逗号兜底——单平台 ``task.platform``
+        （如 ``"douyin"``）不触发，继续回退全局默认，避免改变单平台任务的既有行为。
         """
         raw = getattr(task, "platforms", None)
         if raw:
@@ -647,6 +670,12 @@ class PipelineEngine:
                     return plats
             except (TypeError, ValueError):
                 pass
+        # 旧数据兜底：仅当 platform 确为逗号串（legacy 多平台）才按逗号拆分
+        legacy = getattr(task, "platform", None)
+        if legacy and "," in str(legacy):
+            plats = [p.strip() for p in str(legacy).split(",") if p.strip()]
+            if plats:
+                return plats
         return list(getattr(settings, "output_platforms", None) or ["douyin"])
 
     async def _render_platform_outputs(
@@ -655,7 +684,7 @@ class PipelineEngine:
         storyboard: list[dict],
         tts_segments: dict,
         poem_content: str | None = None,
-    ) -> dict[str, str]:
+    ) -> dict:
         """多平台成片渲染（run_stage.subtitle 与 run_pipeline 共用循环）。
 
         2026-09-10 任务005：旧版 run_stage.subtitle 只渲染 task.platform 单平台，
@@ -665,11 +694,16 @@ class PipelineEngine:
         按画幅比例分组：同比例平台只构建一次 base，组内逐平台烧录 final_{plat}.mp4。
         例：抖音/快手(9:16) 共享一份 base，小红书(3:4) 独立 → 避免重复 ffmpeg 拼接。
 
-        Returns:
-            {platform: final_url}；所有比例组都失败时返回空 dict（调用方 fail-loud）。
+        2026-09-14 多平台成片（REQ-M1/M2）：返回值由 {platform: url} 弱契约升级为
+        {platform: entry} 产物对象（platform_outputs 一等模型）：
+        - 成功: {"url": final_url, "ratio": ar, "duration": sec, "status": "ok"}
+        - 失败: {"ratio": ar, "status": "failed", "error": 原因}（base 缺失或烧录失败）
+        entry 统一保留比例与时长（成功/失败都有），供前端展示画幅与预估时长。
+        返回空 dict 仅当「该任务没有任何目标平台」，各比例组失败时对应平台 entry
+        以 status=failed 形式存在（不再静默丢弃，调用方据此 fail-loud/标记失败）。
         """
         platforms = self._task_platforms(task)
-        platform_urls: dict[str, str] = {}
+        platform_urls: dict = {}
         # 按画幅比例分组（视频渲染的分辨率由比例决定，与平台无关）
         ar_groups: dict[str, list[str]] = {}
         for plat in platforms:
@@ -682,17 +716,29 @@ class PipelineEngine:
             segs = await self._build_segments(task, storyboard, tts_segments, W, H,
                                               platform=rep)
             if not segs.get("ok"):
-                logger.warning(f"task{task.id} 比例组 {ar} base 合成失败，跳过该组 {plats}")
+                # base 合成失败 → 组内所有平台记 failed（reason 可见，不再静默跳过）
+                reason = "比例组 base 合成失败"
+                logger.warning(f"task{task.id} 比例组 {ar} base 合成失败，组内 {plats} 标记 failed: {reason}")
+                for plat in plats:
+                    platform_urls[plat] = {"ratio": ar, "status": FAILED, "error": reason}
                 continue
+            duration = round(float(segs.get("duration") or 0), 1) or None
             for plat in plats:
                 final_url = await self._burn_subtitles(
                     task, segs["base"], storyboard, segs, W, H,
                     platform=plat, poem_content=poem_content,
                 )
                 if final_url:
-                    platform_urls[plat] = final_url
+                    platform_urls[plat] = {
+                        "url": final_url,
+                        "ratio": ar,
+                        "duration": duration,
+                        "status": OK,
+                    }
                     logger.info(f"task{task.id} 平台 {plat}: ✅ {final_url}")
                 else:
+                    reason = "字幕烧录失败（final 未产出）"
+                    platform_urls[plat] = {"ratio": ar, "status": FAILED, "error": reason}
                     logger.warning(f"task{task.id} 平台 {plat}: 烧录失败")
         return platform_urls
 

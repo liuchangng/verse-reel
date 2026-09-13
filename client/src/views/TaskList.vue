@@ -89,7 +89,7 @@
             <td class="col-action">
               <button class="btn btn-sm btn-ghost" @click="viewDetail(task)">详情 →</button>
               <button class="btn btn-sm btn-ghost" @click="showProgress(task)">进度</button>
-              <button v-if="canPublish(task)" class="btn btn-sm btn-primary" @click="publishTask(task)">发布</button>
+              <button v-if="canPublish(task)" class="btn btn-sm btn-primary" @click="openPublish(task)">发布</button>
               <button
                 class="btn btn-sm btn-danger"
                 :disabled="task.status === 'processing'"
@@ -183,6 +183,37 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" @click="deleteTarget = null">取消</button>
           <button class="btn btn-danger-solid" @click="confirmDelete">确认删除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 发布平台选择（多平台成片 REQ-M7：勾选平台后按所选发布） -->
+    <div class="modal-overlay" v-if="publishTaskRef" @click.self="publishTaskRef = null">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>发布到平台</h3>
+          <button class="modal-close" @click="publishTaskRef = null">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="selected-poem">
+            <span class="poem-title">《{{ publishTaskRef.poem_title }}》</span>
+            <span class="poem-author">#{{ publishTaskRef.id }} · {{ publishTaskRef.poem_author }}</span>
+          </div>
+          <label style="display:block;font-size:13px;margin:8px 0 4px;color:var(--color-text-secondary)">选择要发布的平台（可多选）：</label>
+          <div class="platform-options">
+            <label v-for="p in PUBLISH_PLATFORMS" :key="p.id" class="platform-option">
+              <input
+                type="checkbox"
+                :value="p.id"
+                v-model="selectedPublishPlats"
+              />{{ p.icon }} {{ p.name }}
+            </label>
+          </div>
+          <p class="publish-warning">⚠️ 发布后视频将公开展示，此操作不可撤销，请确认产物与内容无误。</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" @click="publishTaskRef = null">取消</button>
+          <button class="btn btn-primary" @click="publishTask">确认发布</button>
         </div>
       </div>
     </div>
@@ -309,12 +340,33 @@ const showProgress = async (task) => {
   }
 }
 
-// 发布
-const publishTask = async (task) => {
+// 发布（多平台成片 REQ-M7）：点"发布"先弹平台选择弹窗（勾选任务 platform_outputs
+// 中成功的平台 + 主平台兜底），确认时按所选平台调 publish API。
+const PUBLISH_PLATFORMS = [
+  { id: 'douyin', name: '抖音', icon: '🎵' },
+  { id: 'kuaishou', name: '快手', icon: '⚡' },
+  { id: 'xiaohongshu', name: '小红书', icon: '📕' },
+  { id: 'bilibili', name: 'B站', icon: '📺' },
+  { id: 'youtube', name: 'YouTube', icon: '▶️' },
+]
+const publishTaskRef = ref(null)          // 当前待发布的任务
+const selectedPublishPlats = ref([])     // 勾选的平台 id
+const openPublish = (task) => {
+  publishTaskRef.value = task
+  // 默认勾选主平台（task.platform）
+  const mainPlat = task.platform || 'douyin'
+  selectedPublishPlats.value = [mainPlat]
+}
+const publishTask = async () => {
+  const task = publishTaskRef.value
+  if (!task) return
+  const plats = selectedPublishPlats.value
+  if (!plats.length) { alert('请至少选择一个平台'); return }
+  publishTaskRef.value = null
   try {
-    const result = await api.publishTask(task.id, [task.platform || 'douyin'])
+    const result = await api.publishTask(task.id, plats)
     const failed = (result.results || []).filter(r => !r.success)
-    alert(failed.length ? `发布失败：${failed.map(f => f.message).join('；')}` : `任务 #${task.id} 发布成功`)
+    alert(failed.length ? `部分发布失败：${failed.map(f => `${f.platform} ${f.message}`).join('；')}` : `任务 #${task.id} 已发布到 ${plats.length} 个平台`)
   } catch (error) {
     alert('发布失败：' + (error.message || error))
   }
@@ -446,6 +498,12 @@ onMounted(() => fetchTasks())
 .modal-tip { font-size: 13px; color: var(--color-text-muted); background: rgba(201, 166, 107, 0.08); padding: var(--spacing-3); border-radius: var(--radius-md); border-left: 3px solid var(--color-primary); line-height: 1.6; }
 .modal-tip--danger { background: #fff1f0; color: #5c1a1a; border-left-color: #cf1322; }
 .modal-footer { display: flex; justify-content: flex-end; gap: var(--spacing-2); padding: var(--spacing-4) var(--spacing-5); border-top: 1px solid var(--color-border-light); }
+
+/* 发布平台选择弹窗（多平台成片 REQ-M7） */
+.platform-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; margin: 6px 0; }
+.platform-option { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--color-border-light); border-radius: var(--radius-md); font-size: 13px; cursor: pointer; }
+.platform-option:has(input:checked) { border-color: var(--color-primary); background: var(--color-primary-bg); }
+.publish-warning { font-size: 12px; color: var(--color-text-muted); background: rgba(201, 166, 107, 0.08); padding: var(--spacing-2) var(--spacing-3); border-radius: var(--radius-md); border-left: 3px solid var(--color-primary); line-height: 1.5; margin-top: 10px; }
 
 /* 执行记录弹窗：扁平日志表 */
 .modal-content--wide { width: 640px; max-height: 80vh; display: flex; flex-direction: column; }

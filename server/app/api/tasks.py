@@ -20,6 +20,7 @@ from app.services.pipeline import pipeline_engine
 from app.services.prompt_optimizer import list_styles, normalize_style, DEFAULT_STYLE
 from app.services.publisher import publisher_service
 from app.services.task_state import patch_task
+from app.services.platform_outputs import parse_platform_outputs, primary_video_url
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ async def list_tasks(
             "current_stage": task.current_stage,
             "progress": task.progress,
             "platform": task.platform,
+            "video_url": task.video_url,
             "script_status": "done" if _script_done else ("processing" if task.current_stage == "script" else "pending"),
             "image_status": "done" if _image_done else ("processing" if task.current_stage == "image" else "pending"),
             "video_status": "done" if _video_done else ("processing" if task.current_stage == "video" else "pending"),
@@ -326,9 +328,10 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
         "subtitle_status": "done" if _subtitle_done else ("processing" if task.current_stage == "subtitle" else "pending"),
         "video_url": task.video_url,
         "video_duration": task.video_duration,
-        # 多平台成片 URL 映射（JSON 字符串）：前端视频预览按平台数量渲染多个成片。
-        # 缺省/单平台时为空，前端回退到单个 video_url。
-        "platform_outputs": task.platform_outputs,
+        # 多平台成片（REQ-M5，2026-09-14）：DB 原始 JSON → 契约层归一化为
+        # {platform: {url?, ratio, duration?, status, error?}} 对象；旧
+        # {platform: "url"} 弱契约值自动包成成功 entry，非法 JSON 降级 {}。
+        "platform_outputs": parse_platform_outputs(task.platform_outputs),
         # 各平台发布文案（publish_copy 阶段产物，详情页直接展示，不触发 LLM）
         "publish_copies": publish_copies,
         "storyboard": storyboard,
@@ -501,26 +504,60 @@ async def publish_task(
     if not task.video_url:
         raise HTTPException(status_code=400, detail="没有可发布的视频")
     
+    # 多平台成片（REQ-M7，2026-09-14）：发布入口按平台取对应成片。
+    # platform_outputs 为「平台 → 产物 entry」的一等模型（契约层归一化：
+    # 旧 {plat: "url"} 弱契约值自动包成成功 entry，非法 JSON 降级 {}）。
+    # 请求了某平台但 platform_outputs 中无该平台的成功 entry → 400 明确报错，
+    # 不静默回退主平台（避免拿 9:16 的抖音成片发到 16:9 的 B 站，画幅不匹配）。
+    # 单平台任务（无 platform_outputs）或显式指定主平台 → 保持旧行为用 video_url。
+    primary_plat = task.platform or "douyin"
+    requested = [p for p in platforms if p] or [primary_plat]
+    po = parse_platform_outputs(task.platform_outputs)
+    video_by_plat: dict[str, str] = {}
+    if po:
+        for plat in requested:
+            url = primary_video_url({plat: po[plat]}, plat) if plat in po else None
+            if url:
+                video_by_plat[plat] = url
+            else:
+                entry = po.get(plat, {})
+                reason = entry.get("error") if isinstance(entry, dict) else None
+                if reason:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"平台 {plat} 成片生成失败（{reason}），无法发布",
+                    )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"平台 {plat} 缺少成片产物（platform_outputs 无该平台的成功 entry），无法发布",
+                )
+    
     # 获取诗词信息
     poem = await db.get(Poem, task.poem_id)
     if not poem:
         raise HTTPException(status_code=404, detail="诗词不存在")
     
     # 生成发布内容
+    # 多平台时按 task.platform（主平台）生成标题/描述/话题，发布到各平台时
+    # 使用各平台自己的成片（REQ-M7）；单平台/无映射时沿用主平台 video_url。
     content = await publisher_service.generate_publish_content(
         script=task.script or "",
         poem_title=poem.title,
         platform=task.platform,
     )
     
-    # 发布到各平台
-    results = await publisher_service.publish_to_multiple(
-        video_path=task.video_url,
-        title=content["title"],
-        description=content["description"],
-        tags=content["tags"],
-        platforms=platforms,
-    )
+    # 发布到各平台（每平台用对应的成片 URL）
+    results = []
+    for plat in requested:
+        url = video_by_plat.get(plat, task.video_url)
+        r = await publisher_service.publish_to_multiple(
+            video_path=url,
+            title=content["title"],
+            description=content["description"],
+            tags=content["tags"],
+            platforms=[plat],
+        )
+        results.extend(r)
     
     return {
         "task_id": task_id,

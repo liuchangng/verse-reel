@@ -237,7 +237,9 @@ STAGE_OUTPUTS = {
     "image": ["image_urls", "image_score"],
     "tts": ["audio_url"],
     "video": ["video_url", "video_duration"],
-    "subtitle": ["subtitle_url"],
+    # 2026-09-14 多平台成片 REQ-M4：subtitle 重跑必须连同 platform_outputs 一起
+    # 作废——旧映射里残留的 key（已取消的平台/旧产物）不得混进新一轮结果。
+    "subtitle": ["subtitle_url", "platform_outputs"],
     "publish_copy": ["publish_copies"],
 }
 

@@ -158,6 +158,32 @@ async def test_enqueue_preserves_terminal_jobs_as_history(env, monkeypatch):
 
 
 # ---------------------------------------------------------------- #
+# 2b. 重跑 subtitle 时 platform_outputs 旧 key 必须清除（REQ-M4，多平台成片）
+# ---------------------------------------------------------------- #
+
+@pytest.mark.asyncio()
+async def test_regen_subtitle_clears_platform_outputs(env, monkeypatch):
+    """重跑 subtitle 阶段（clear_outputs=True）必须连同旧 platform_outputs 一起清空，
+    旧映射里残留的平台 key / 旧产物 URL 不得混进新一轮结果。"""
+    svc = QueueService()
+    old_outputs = json.dumps(
+        {"douyin": {"url": "http://x/outputs/task_1/final_douyin.mp4",
+                    "ratio": "9:16", "status": "ok"},
+         "bilibili": {"url": "http://x/outputs/task_1/final_bilibili.mp4",
+                      "ratio": "16:9", "status": "ok"}},
+        ensure_ascii=False,
+    )
+    await _mk_task(env, 1, script="文案正文", subtitle_url="http://x/old.mp4",
+                   platform_outputs=old_outputs)
+    await svc.enqueue_task(task_id=1, stages=["subtitle"], clear_outputs=True)
+
+    async with env() as s:
+        task = await s.get(Task, 1)
+    assert task.platform_outputs is None, "重跑 subtitle 后旧 platform_outputs 必须被清空"
+    assert task.subtitle_url is None, "subtitle_url 同阶段产物，一并清空"
+
+
+# ---------------------------------------------------------------- #
 # 3. jobs API 按阶段聚合：历史尝试拼接、状态取最新
 # ---------------------------------------------------------------- #
 

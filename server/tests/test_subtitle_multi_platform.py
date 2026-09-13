@@ -9,7 +9,9 @@
    platform_outputs 写入多平台映射（同比例只烧一份，如 douyin/kuaishou 共 9:16）；
 2. 单平台任务不写 platform_outputs（保持旧行为）；
 3. 所有比例组失败 → fail-loud 抛错（不静默出半成品）；
-4. run_pipeline 与 run_stage 共用同一渲染方法（防再次漂移）。
+4. run_pipeline 与 run_stage 共用同一渲染方法（防再次漂移）；
+5. 渲染层返回 entry 对象（2026-09-14 多平台成片 REQ-M2）：成功 entry 含
+   url/ratio/duration/status=ok，base 失败组内平台 entry 为 status=failed+error。
 """
 import sys
 import os
@@ -32,8 +34,12 @@ def _make_task(platform="douyin", platforms=None):
     return t
 
 
-def _patch_render(monkeypatch, build_ok=True, burn_fail=()):
-    """mock _build_segments/_burn_subtitles，记录调用轨迹。"""
+def _patch_render(monkeypatch, build_ok=True, burn_fail=(), burn_returns=None):
+    """mock _build_segments/_burn_subtitles，记录调用轨迹。
+
+    burn_returns: 可选 dict {platform: url}，用于按平台控制烧录产物（默认成功时
+    生成 http://x/outputs/task_99/final_{platform}.mp4）。
+    """
     from app.services.pipeline import pipeline_engine
     calls = {"build": [], "burn": []}
 
@@ -48,6 +54,8 @@ def _patch_render(monkeypatch, build_ok=True, burn_fail=()):
         calls["burn"].append(platform)
         if platform in burn_fail:
             return None
+        if burn_returns is not None and platform in burn_returns:
+            return burn_returns[platform]
         return f"http://x/outputs/task_99/final_{platform}.mp4"
 
     monkeypatch.setattr(pipeline_engine, "_build_segments", fake_build)
@@ -72,7 +80,68 @@ async def test_subtitle_stage_renders_all_platform_groups(monkeypatch):
     assert calls["build"] == ["douyin", "xiaohongshu"]
     assert sorted(calls["burn"]) == ["douyin", "kuaishou", "xiaohongshu"]
     assert set(urls) == {"douyin", "xiaohongshu", "kuaishou"}
-    assert urls["douyin"].endswith("final_douyin.mp4")
+    # entry 对象契约（REQ-M2）：成功 entry 含 url + status=ok
+    assert urls["douyin"]["url"].endswith("final_douyin.mp4")
+    assert urls["douyin"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_render_entry_carries_ratio_and_duration(monkeypatch):
+    """成功 entry 携带比例与时长（design §4.1：ratio/duration 随成片记录）。"""
+    from app.services.pipeline import pipeline_engine
+
+    _patch_render(monkeypatch)
+    monkeypatch.setattr("app.services.pipeline.settings.output_platforms",
+                        ["douyin", "bilibili"])
+
+    task = _make_task(platform="douyin", platforms=None)
+    urls = await pipeline_engine._render_platform_outputs(task, [], {"segments": []})
+
+    assert urls["douyin"]["ratio"] == "9:16"
+    assert urls["bilibili"]["ratio"] == "16:9"
+    # _build_segments 返回 duration=1.0（mock），entry 记录同组同值
+    assert urls["douyin"]["duration"] == urls["bilibili"]["duration"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_base_failure_marks_group_platforms_failed(monkeypatch):
+    """比例组 base 合成失败 → 组内所有平台 entry status=failed + error（不静默丢弃）。"""
+    from app.services.pipeline import pipeline_engine
+
+    calls = _patch_render(monkeypatch, build_ok=False)
+    monkeypatch.setattr("app.services.pipeline.settings.output_platforms",
+                        ["douyin", "kuaishou", "xiaohongshu"])
+
+    task = _make_task(platform="douyin", platforms=None)
+    urls = await pipeline_engine._render_platform_outputs(task, [], {"segments": []})
+
+    # 9:16 组（douyin/kuaishou）与 3:4 组（xiaohongshu）均 base 失败
+    assert set(urls) == {"douyin", "kuaishou", "xiaohongshu"}
+    for plat in urls.values():
+        assert plat["status"] == "failed"
+        assert plat["error"]
+        assert "url" not in plat
+    # base 失败时不会触发烧录
+    assert calls["burn"] == []
+
+
+@pytest.mark.asyncio
+async def test_burn_failure_marks_platform_failed(monkeypatch):
+    """单平台烧录失败 → 该平台 entry status=failed + error，其余平台正常。"""
+    from app.services.pipeline import pipeline_engine
+
+    _patch_render(monkeypatch, burn_fail=("kuaishou",))
+    monkeypatch.setattr("app.services.pipeline.settings.output_platforms",
+                        ["douyin", "kuaishou"])
+
+    task = _make_task(platform="douyin", platforms=None)
+    urls = await pipeline_engine._render_platform_outputs(task, [], {"segments": []})
+
+    assert urls["douyin"]["status"] == "ok"
+    assert urls["douyin"]["url"].endswith("final_douyin.mp4")
+    assert urls["kuaishou"]["status"] == "failed"
+    assert "url" not in urls["kuaishou"]
+    assert urls["kuaishou"]["ratio"] == "9:16"
 
 
 @pytest.mark.asyncio
@@ -92,9 +161,11 @@ async def test_subtitle_stage_single_platform_no_outputs_json(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_render_fail_loud_when_all_groups_fail(monkeypatch):
-    """所有比例组 base 合成失败 → 空 dict，调用方 fail-loud 抛错。"""
+async def test_render_all_platforms_failed_yields_no_ok(monkeypatch):
+    """所有比例组 base 失败 → 渲染层返回的 mapping 无任何成功 entry
+    （调用方 run_stage 据 primary_video_url 为 None fail-loud）。"""
     from app.services.pipeline import pipeline_engine
+    from app.services.platform_outputs import primary_video_url
 
     _patch_render(monkeypatch, build_ok=False)
     monkeypatch.setattr("app.services.pipeline.settings.output_platforms",
@@ -102,7 +173,7 @@ async def test_render_fail_loud_when_all_groups_fail(monkeypatch):
 
     task = _make_task(platform="douyin", platforms=None)
     urls = await pipeline_engine._render_platform_outputs(task, [], {"segments": []})
-    assert urls == {}
+    assert primary_video_url(urls, "douyin") is None
 
 
 def test_run_stage_and_run_pipeline_share_renderer():
