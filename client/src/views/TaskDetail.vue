@@ -557,9 +557,12 @@ const loadPublishContent = async () => {
   } catch (e) { /* 生成失败静默：卡片不显示文案块，不阻塞页面 */ }
   finally { copyLoading.value = false }
 }
-// 视频组变化（任务跑完出 video_url、或平台列表变动）时自动重拉文案
+// 视频组变化（任务跑完出 video_url、或平台列表变动）时自动重拉文案。
+// 2026-09-13 修复（immediate 崩溃）：immediate 首次触发时 oldPlats=undefined，
+// 旧代码对 undefined 调 .join/.length 抛 TypeError。现 oldPlats 做数组兜底。
 watch(copyPlatforms, (newPlats, oldPlats) => {
-  if (newPlats.length > oldPlats.length || newPlats.join(',') !== oldPlats.join(',')) {
+  const old = Array.isArray(oldPlats) ? oldPlats : []
+  if (newPlats.length > old.length || newPlats.join(',') !== old.join(',')) {
     loadPublishContent()
   }
 }, { immediate: true })
