@@ -363,6 +363,11 @@ class PipelineEngine:
             )
             if image_urls:
                 task.image_urls = json.dumps(image_urls, ensure_ascii=False)
+                # 落盘：image 阶段把远程图下载到本地并持久化路径，合成阶段优先读本地，
+                # 彻底摆脱对 agnes CDN 可达性的依赖（2026-09-13 根因修复）
+                local_paths = await self._persist_images_local(task, image_urls)
+                if local_paths:
+                    task.image_local_paths = json.dumps(local_paths, ensure_ascii=False)
                 if not task.image_score:
                     task.image_score = 8
             await db.commit()
@@ -1299,41 +1304,95 @@ class PipelineEngine:
                 "total_duration": round(total, 2)}
     
     async def _download_storyboard_images(self, task: "Task", output_dir: Path) -> list:
-        """下载 task.image_urls 分镜图到本地，返回成功下载的本地路径列表（失败跳过）。"""
-        raw = getattr(task, "image_urls", None)
+        """确保分镜图在本地 output_dir 可用，返回本地路径列表（失败跳过并显式报错）。
+
+        2026-09-13 根因修复（change-id=image-local-persist + composite-local-cache）：
+        - 本地落盘优先：``task.image_local_paths`` 已持久化本地路径且存在 → 直接复用，
+          彻底不依赖 agnes CDN 可达性（image 阶段已落盘）。
+        - 回退：``task.image_urls`` 仍是远程 URL → 下载并落盘为 ``img_{i}.png``（强制
+          png，与 ``_build_segments`` 命名 ``img_{i}.png`` / ``img_{i}_wm.png`` 一致；
+          旧实现按 ctype 存 jpg/webp 会与合成的 .png 查找错位）。
+        - 失败：记 ``ERROR``（含 URL + 原因），跳过该张而非静默丢弃，调用方据此 fail-loud。
+        """
+        raw_urls = getattr(task, "image_urls", None)
+        raw_lp = getattr(task, "image_local_paths", None)
         try:
-            urls = json.loads(raw) if raw else []
+            urls = json.loads(raw_urls) if raw_urls else []
         except Exception:
             urls = []
+        try:
+            lps = json.loads(raw_lp) if raw_lp else []
+        except Exception:
+            lps = []
         if not isinstance(urls, list):
             urls = []
+        if not isinstance(lps, list):
+            lps = []
         local = []
-        for i, u in enumerate(urls):
+        n = max(len(urls), len(lps))
+        for i in range(n):
+            u = urls[i] if i < len(urls) else None
+            lp = lps[i] if i < len(lps) else None
+            # 1) 本地落盘优先（image_local_paths 应为本地路径，误存 http 则忽略）
+            if lp and not str(lp).startswith("http"):
+                p = Path(lp)
+                if p.exists() and p.stat().st_size > 0:
+                    local.append(str(p))
+                    continue
+            # 2) 远程 URL → 下载落盘（强制 png，与 _build_segments 命名一致）
             if not u or not str(u).startswith("http"):
+                if u:
+                    logger.warning(f"分镜图来源既非本地也非 http，跳过 [{u}]")
                 continue
+            dst = output_dir / f"img_{i}.png"
             try:
                 async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                     resp = await client.get(u)
                     resp.raise_for_status()
-                    ctype = (resp.headers.get("content-type") or "").lower()
-                    ext = "jpg"
-                    if "png" in ctype:
-                        ext = "png"
-                    elif "webp" in ctype:
-                        ext = "webp"
-                    p = output_dir / f"img_{i}.{ext}"
-                    p.write_bytes(resp.content)
-                    if p.stat().st_size > 0:
-                        # 文字水印：视频与分镜图统一标识（防搬运/品牌）
-                        if settings.watermark_enabled and settings.watermark_text:
-                            wm = output_dir / f"img_{i}_wm.png"
-                            if await self._apply_image_watermark(settings.ffmpeg_path, p, wm):
-                                local.append(str(wm))
-                                continue
-                        local.append(str(p))
+                dst.write_bytes(resp.content)
+                if dst.stat().st_size > 0:
+                    # 文字水印：视频与分镜图统一标识（防搬运/品牌）
+                    if settings.watermark_enabled and settings.watermark_text:
+                        wm = output_dir / f"img_{i}_wm.png"
+                        if await self._apply_image_watermark(settings.ffmpeg_path, dst, wm):
+                            local.append(str(wm))
+                            continue
+                    local.append(str(dst))
+                else:
+                    logger.error(f"分镜图下载内容为空，跳过 [{u}]")
             except Exception as e:
-                logger.warning(f"分镜图下载失败 [{u}]: {e}")
-        logger.info(f"分镜图可用 {len(local)}/{len(urls)}")
+                logger.error(f"分镜图下载失败 [{u}]: {e}")
+        logger.info(f"分镜图可用 {len(local)}/{n}")
+        return local
+
+    async def _persist_images_local(self, task: "Task", image_urls: list) -> list:
+        """image 阶段把分镜图下载到本地 ``data/output/task_{id}/img_{i}.png``，返回本地
+        路径列表（best-effort）。
+
+        2026-09-13 根因修复（change-id=image-local-persist）：让成片渲染不再依赖 agnes
+        CDN 实时可达。落盘失败不阻断 image 阶段——合成阶段仍可从 ``image_urls`` 回退下载。
+        """
+        if not isinstance(image_urls, list):
+            return []
+        out = Path(settings.output_dir) / f"task_{task.id}"
+        out.mkdir(parents=True, exist_ok=True)
+        local = []
+        for i, u in enumerate(image_urls):
+            if not u or not str(u).startswith("http"):
+                if u and Path(u).exists():
+                    local.append(str(u))
+                continue
+            dst = out / f"img_{i}.png"
+            try:
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                    resp = await client.get(u)
+                    resp.raise_for_status()
+                dst.write_bytes(resp.content)
+                if dst.stat().st_size > 0:
+                    local.append(str(dst))
+            except Exception as e:
+                logger.warning(f"image 阶段落盘失败 [{u}]: {e}")
+        logger.info(f"task{task.id} 分镜图落盘 {len(local)}/{len(image_urls)}")
         return local
 
     async def _probe_image_height(self, path) -> int | None:
@@ -1406,6 +1465,17 @@ class PipelineEngine:
                 if img.exists() and aud.exists():
                     pairs.append((s, str(img), str(aud)))
             if not pairs:
+                # 诊断信息：区分"分镜图下载失败"与"TTS 音频缺失"，便于定位 0 出片根因
+                n_img_local = sum(
+                    1 for s in segs
+                    if (output_dir / f"img_{s['index']}.png").exists()
+                    or (output_dir / f"img_{s['index']}_wm.png").exists()
+                )
+                n_aud = sum(1 for s in segs if Path(s.get("path", "")).exists())
+                logger.error(
+                    f"task{task.id} 逐镜合成无可用的(图,音频)对: "
+                    f"分镜图本地可用 {n_img_local}/{len(segs)}，音频本地可用 {n_aud}/{len(segs)}"
+                )
                 return {"ok": False}
             seg_files = []
             durs = []

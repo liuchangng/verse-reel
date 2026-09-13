@@ -42,6 +42,10 @@ class Task(Base):
     video_url = Column(String(500), comment="视频URL")
     video_duration = Column(Integer, comment="视频时长(秒)")
     image_urls = Column(Text, comment="生成的图片URL列表(JSON)")
+    # 分镜图本地落盘路径列表(JSON)。image 阶段把远程图下载到本地并持久化，
+    # 合成阶段优先读本地，彻底摆脱对 agnes CDN 可达性的依赖（2026-09-13 根因修复，
+    # change-id=image-local-persist）。为空时合成阶段回退为按需下载 image_urls。
+    image_local_paths = Column(Text, nullable=True, comment="分镜图本地路径列表(JSON)")
     character_ref = Column(String(500), comment="角色定妆照URL(用于分镜图一致性)")
     audio_url = Column(String(500), comment="配音音频URL")
     subtitle_url = Column(String(500), comment="字幕文件路径")
