@@ -213,7 +213,7 @@
     <div class="section-card" v-if="hasVideos">
       <div class="section-header">
         <div class="section-title">🎬 视频预览</div>
-        <span class="video-meta">{{ videoGroupsByRatio.length }} 个不同比例成片 · {{ task.video_duration || '?' }}秒</span>
+        <span class="video-meta">{{ videoGroupsByRatio.length }} 个不同比例成片{{ task.video_duration ? ` · ${task.video_duration}秒` : '' }}</span>
       </div>
       <div class="video-grid">
         <div class="video-card" v-for="g in videoGroupsByRatio" :key="g.ratio">
@@ -227,11 +227,17 @@
           <video :src="g.url" controls style="width:100%;max-height:340px;background:#000;"></video>
           <!-- Q3：按组内各平台分块展示 LLM 生成的发布文案（标题/描述/话题） -->
           <div class="video-copy-blocks">
+            <!-- 2026-09-13 修复（白屏）：外层用 v-if 而非 v-show。
+                 根因：copyByPlatform 只含后端实际落库文案的平台，而 g.platformIds
+                 是视频组声明的全部平台，二者集合不一致。v-show 只切 CSS display、
+                 不阻止内部绑定求值，copyByPlatform[p] 为 undefined 时内层
+                 .generated/.title/.tags 表达式直接抛 TypeError → 渲染崩 → 白屏。
+                 v-if 为 falsy 时整块不创建 DOM，内部表达式全部不执行，根治。 -->
             <div
               v-for="p in g.platformIds"
               :key="p"
               class="copy-block"
-              v-show="copyByPlatform[p]"
+              v-if="copyByPlatform[p]"
             >
               <div class="copy-block-head">
                 <span class="copy-plat">{{ PLAT_INFO[p] ? PLAT_INFO[p].name : p }}</span>
@@ -253,6 +259,10 @@
                   <span v-for="t in copyByPlatform[p].tags" :key="t" class="copy-tag">{{ t.startsWith('#') ? t : '#' + t }}</span>
                 </span>
                 <button class="copy-btn" @click="copyField(p,'tags')" title="复制话题">📋</button>
+              </div>
+              <!-- 该平台有文案但所有字段都空时，显示占位提示（避免空卡片） -->
+              <div v-if="!(copyByPlatform[p].title || copyByPlatform[p].description || (copyByPlatform[p].tags && copyByPlatform[p].tags.length))" class="copy-field-empty">
+                <span class="copy-field-label">暂无发布文案</span>
               </div>
             </div>
             <div v-if="copyLoading && !Object.keys(copyByPlatform).length" class="copy-block-loading">
@@ -502,7 +512,20 @@ const loadPublishContent = async () => {
   copyLoading.value = true
   try {
     const r = await api.generatePublishContent(taskId.value, copyPlatforms.value)
-    if (r && r.content) Object.assign(copyByPlatform.value, r.content)
+    // 2026-09-13 防御（白屏根治配套）：后端可能某平台只回了部分字段（缺 tags/generated），
+    // 直接 Object.assign 后渲染读 undefined 属性仍会抛错。此处对每条平台文案做字段兜底，
+    // 保证 copyByPlatform[p] 始终是完整 { title, description, tags, generated } 结构。
+    if (r && r.content) {
+      for (const [plat, c] of Object.entries(r.content)) {
+        if (!c || typeof c !== 'object') continue
+        copyByPlatform.value[plat] = {
+          title: c.title || '',
+          description: c.description || '',
+          tags: Array.isArray(c.tags) ? c.tags : [],
+          generated: !!c.generated,
+        }
+      }
+    }
   } catch (e) { /* 生成失败静默：卡片不显示文案块，不阻塞页面 */ }
   finally { copyLoading.value = false }
 }
