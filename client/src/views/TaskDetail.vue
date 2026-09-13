@@ -512,10 +512,16 @@ const exportVideo = (url) => url ? window.open(url) : alert('视频尚未生成'
 const previewImage = (url) => window.open(url, '_blank')
 
 // ====== Q3：视频卡片下方按需 LLM 平台文案（标题/描述/话题） ======
-// 有成片（videoGroupsByRatio 非空）才拉取；onMounted 触发一次，
-// 按各视频组内平台 id 请求，后端 LLM 按平台字数/话题规范生成 + 进程内缓存。
+// 有成片（videoGroupsByRatio 非空）才拉取。
+// 2026-09-13 修复（文案永远空白）：旧版只在 onMounted 调一次 loadPublishContent，
+// 但任务 processing 时 video_url 尚为 null → copyPlatforms=[] 早退；任务跑完
+// loadTask/WS 更新 video_url 后不会重拉 → 文案永远空。
+// 现改为 watch copyPlatforms（含初始立即触发），视频组出现/变化即拉取文案，
+// 且已请求过的平台不重复请求（loadPublishContent 内去重）。
+import { watch } from 'vue'
 const copyByPlatform = ref({})   // { platform: { title, description, tags, generated } }
 const copyLoading = ref(false)
+const requestedPlatforms = ref(new Set())   // 已请求过的平台，防重复
 const copyPlatforms = computed(() => {
   const ids = []
   for (const g of videoGroupsByRatio.value) {
@@ -525,10 +531,12 @@ const copyPlatforms = computed(() => {
 })
 const loadPublishContent = async () => {
   if (copyLoading.value) return
-  if (copyPlatforms.value.length === 0) return
+  const pending = copyPlatforms.value.filter(p => !requestedPlatforms.value.has(p))
+  if (pending.length === 0) return
   copyLoading.value = true
   try {
-    const r = await api.generatePublishContent(taskId.value, copyPlatforms.value)
+    // 只请求尚未拉取过的平台，避免 watch 触发时重复请求
+    const r = await api.generatePublishContent(taskId.value, pending)
     // 2026-09-13 防御（白屏根治配套）：后端可能某平台只回了部分字段（缺 tags/generated），
     // 直接 Object.assign 后渲染读 undefined 属性仍会抛错。此处对每条平台文案做字段兜底，
     // 保证 copyByPlatform[p] 始终是完整 { title, description, tags, generated } 结构。
@@ -541,11 +549,20 @@ const loadPublishContent = async () => {
           tags: Array.isArray(c.tags) ? c.tags : [],
           generated: !!c.generated,
         }
+        requestedPlatforms.value.add(plat)
       }
     }
+    // 请求过但后端没返回的平台也标记，防止 watch 反复请求
+    for (const p of pending) requestedPlatforms.value.add(p)
   } catch (e) { /* 生成失败静默：卡片不显示文案块，不阻塞页面 */ }
   finally { copyLoading.value = false }
 }
+// 视频组变化（任务跑完出 video_url、或平台列表变动）时自动重拉文案
+watch(copyPlatforms, (newPlats, oldPlats) => {
+  if (newPlats.length > oldPlats.length || newPlats.join(',') !== oldPlats.join(',')) {
+    loadPublishContent()
+  }
+}, { immediate: true })
 // 一键复制某平台某字段（标题/描述/话题）到剪贴板，供手动粘贴到各 App
 const copyField = async (plat, field) => {
   const c = copyByPlatform.value[plat]
