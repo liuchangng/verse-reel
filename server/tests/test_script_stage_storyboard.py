@@ -6,7 +6,10 @@
 
 守护点：
 - script 阶段完成时 task.storyboard 必须就绪（由文案生成，tier 按任务平台解析）；
-- 文案评分未达标提前返回时，不得生成分镜（保持清空态）。
+- 文案评分未达标时 fail-loud 抛错，且不得生成分镜（保持清空态）。
+  ＊2026-09-14 语义变更（change-id=script-rubric-fail-loud）：旧实现只把 task
+  置 failed 后 return（Job 仍记 done、下游误判前置满足继续白跑）；现改为抛错
+  让 Job 落 failed。守护意图不变：分镜不得落库、任务必须落 failed。
 """
 import json
 
@@ -81,8 +84,12 @@ async def test_script_stage_generates_storyboard(sb_env):
 
 
 @pytest.mark.asyncio()
-async def test_script_score_fail_skips_storyboard(sb_env, monkeypatch):
-    """文案评分未达标 → 提前返回，不生成分镜（保持清空态）"""
+async def test_script_score_fail_raises_and_skips_storyboard(sb_env, monkeypatch):
+    """文案评分未达标 → fail-loud 抛错，不生成分镜（保持清空态）
+
+    2026-09-14（change-id=script-rubric-fail-loud）：旧实现 return 让 Job 记 done，
+    导致「task=failed / Job=done」自相矛盾、下游对不合格文案继续白跑；现抛错。
+    """
     factory, _ = sb_env
 
     class _FailCritic:
@@ -96,7 +103,9 @@ async def test_script_score_fail_skips_storyboard(sb_env, monkeypatch):
     monkeypatch.setattr(pipeline_mod, "critic_service", _FailCritic())
 
     async with factory() as db:
-        await pipeline_engine.run_stage(db, 1, "script")
+        with pytest.raises(RuntimeError) as ei:
+            await pipeline_engine.run_stage(db, 1, "script")
+        assert "文案评分未达标" in str(ei.value), str(ei.value)
         task = await db.get(Task, 1)
         assert task.storyboard is None, "评分未达标时不得生成分镜"
         assert task.status == "failed"

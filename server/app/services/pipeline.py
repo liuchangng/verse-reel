@@ -280,9 +280,31 @@ class PipelineEngine:
             )
 
         if stage == "script":
-            if _have("script") and not force:
+            # script 阶段的"完成"必须同时具备文案与分镜（2026-09-14 修复，
+            # change-id=script-rubric-fail-loud）。
+            # 旧实现只判 task.script 非空即跳过，而 _generate_script 恒落库文案、
+            # 仅在 main_score.passed 时才写分镜 ⇒「有文案无分镜」正是「上次文案
+            # 评分未达标」的落库形态。旧逻辑把它当"已完成"直接 return、Job 记 done
+            # —— 这是"静默假完成"的上游源头：
+            #   ① task.status 被判 failed，Job 却报成功，同一任务内状态自相矛盾；
+            #   ② _task_produced()['script'] 只判文案非空 ⇒ 下游 character/image/
+            #      tts/subtitle 的 _deps_satisfied 误判前置已满足，一路放行，直到
+            #      tts 阶段"缺分镜"才兜底失败（见 tts-stage-storyboard-required）。
+            # 现从源头切断：分镜缺失即 fail-loud。
+            has_script = _have("script")
+            has_storyboard = _have("storyboards_json") or _have("storyboard")
+            if has_script and has_storyboard and not force:
                 logger.info(f"task{task_id} script 已存在，跳过 stage")
                 return
+            if has_script and not has_storyboard and not force:
+                # 文案已落库但分镜缺失 ⇒ 上一轮 _generate_script 判定文案评分未达标
+                # （分镜只在评分通过时落库）。这是确定性结果：重试不会改变 LLM 对
+                # 同一文案的评分，故立即抛错（不重复烧 LLM），让 Job 落 failed，再由
+                # queue._maybe_finalize 把任务干净落终态。
+                raise RuntimeError(
+                    f"script 未达成：文案已存在但分镜缺失（上次文案评分未达标，"
+                    f"script_score={task.script_score}），需修正文案或 force 强制重生成"
+                )
             if poem is None:
                 raise RuntimeError("script 缺少前置 poem")
             # 热点来源修复（2026-09-09）：文案只注入"任务创建时持久化的来源热点"。
@@ -298,10 +320,17 @@ class PipelineEngine:
             script_text, score = await self._generate_script(db, task, poem, style, keywords)
             task.style = style
             if not score.passed:
+                # fail-loud（2026-09-14 change-id=script-rubric-fail-loud）：
+                # 旧实现只把 task 置 failed 就 return，Job 仍以 **done** 收尾 ⇒ 同一
+                # 任务内"task=failed / Job=done"自相矛盾，且下游自愈会继续补建 Job
+                # 白跑（实测由 subtitle 触发的 tts 空转补建 1300+ 次）。改为抛错：
+                # Job 落 failed → _maybe_finalize 落任务终态 → 级联失败其余 pending
+                # Job；失败原因（评分未达标）同时留在 task.error_message 与
+                # job.last_error，前端两处可见。
                 task.status = "failed"
                 task.error_message = f"文案评分未达标: {score.feedback}"
                 await db.commit()
-                return
+                raise RuntimeError(task.error_message)
             # 文案/分镜变了 → 下游产物全部失效，清空让后续阶段重跑。
             # 2026-09-09 任务001事故：旧版只清图片侧，残留的旧音频/旧视频既造成
             # 前端"下游已完成"的乱序假象，也会被产物自检复用（旧片配新文案，内容
@@ -572,10 +601,13 @@ class PipelineEngine:
             )
             
             if not script_score.passed:
+                # fail-loud（同 run_stage.script，change-id=script-rubric-fail-loud）：
+                # 旧实现 return 后 run_pipeline 继续按"成功"推进（Job/任务状态错乱）；
+                # 改为抛错由本函数 except 统一落 failed 并把原因写进 error_message。
                 task.status = "failed"
                 task.error_message = f"文案评分未达标: {script_score.feedback}"
                 await db.commit()
-                return
+                raise RuntimeError(task.error_message)
 
             # 阶段2: 逐档生成（文案+分镜）已由 _generate_script 完成——
             # 主档写入 task.storyboard/task.script，全档写入 task.storyboards_json。
