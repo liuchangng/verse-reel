@@ -9,9 +9,13 @@
 - 不主动发布：用户人工发；脚本只建任务 + 进生成队列。
 - 分批控制：默认每批 10 个任务，批间 sleep 避免流水线爆满（视频 1次/分钟限速）。
 
-修复记录（2026-09-14）：``platforms`` 必须以 list 传参。旧版 ``",".join(PLATFORMS)``
-被后端解析成单元素 ``["douyin,bilibili"]``，落库畸形并污染产物文件名为
-``seg_douyin,bilibili_*.mp4`` 等。详见 ``build_create_params`` 的根因注释。
+修复记录（2026-09-14）：
+1. ``platforms`` 必须以 list 传参。旧版 ``",".join(PLATFORMS)`` 被后端解析成单元素
+   ``["douyin,bilibili"]``，落库畸形并污染产物文件名为 ``seg_douyin,bilibili_*.mp4``
+   等。详见 ``build_create_params`` 根因注释。
+2. 断点续跑此前**静默失效**（``page_size=1000`` 触发 HTTP 422 + 列表项缺
+   ``source_hotspot_title``），重复运行会重复建满 75 条。详见
+   ``fetch_existing_curriculum_tags`` 根因注释。
 
 用法（先起好后端，APP_TOKEN 与 .env 一致）：
   python scripts/batch_curriculum.py [--batch 10] [--dry-run] [--resume]
@@ -79,6 +83,55 @@ def build_create_params(item: dict, style: str = "") -> dict:
     return params
 
 
+# 列表接口 page_size 上限：api/tasks.py 为 Query(20, ge=1, le=100)，
+# 超过即 422（实测 page_size=1000 → HTTP 422 + {"detail": ...}）。
+PAGE_SIZE_MAX = 100
+
+
+async def fetch_existing_curriculum_tags(
+    client: httpx.AsyncClient, headers: dict
+) -> set[str]:
+    """分页拉取已建的课标任务标记集合（断点续跑的唯一依据）。
+
+    根因记录（2026-09-14，change-id=curriculum-resume-tags）
+    -----------------------------------------------------
+    断点续跑此前是**静默失效**的，两个独立缺陷叠加：
+
+    1. 旧版一次性请求 ``page_size=1000``，而接口约束 ``le=100`` ⇒ **HTTP 422**，
+       响应体是 ``{"detail": ...}``，``.get("items", [])`` 取空；
+    2. 即便用合法 page_size，列表项也**不含** ``source_hotspot_title``
+       （已在 ``api/tasks.py::list_tasks`` 补该字段）。
+
+    两者共同导致 ``existing_tags`` 恒为空 ⇒ 重复运行会**重复建满 75 条**。
+    本函数改为按 ``PAGE_SIZE_MAX`` 翻页，并在非 200 时 fail-loud（不再静默当空）。
+    """
+    tags: set[str] = set()
+    page = 1
+    while True:
+        r = await client.get(
+            "/api/tasks/",
+            params={"page": page, "page_size": PAGE_SIZE_MAX},
+            headers=headers,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"拉取任务列表失败（断点续跑无法判定，拒绝继续建任务）: "
+                f"HTTP {r.status_code} {r.text[:200]}"
+            )
+        data = r.json()
+        items = data.get("items") or []
+        for t in items:
+            tag = t.get("source_hotspot_title") or ""
+            if tag.startswith("curriculum:primary:"):
+                tags.add(tag)
+        total = int(data.get("total") or 0)
+        # 空页 / 已覆盖 total 即停（空页保护，防 total 失真时死循环）
+        if not items or page * PAGE_SIZE_MAX >= total:
+            break
+        page += 1
+    return tags
+
+
 async def run(args: argparse.Namespace) -> None:
     data = json.loads(CURRICULUM.read_text(encoding="utf-8"))
     items = [it for it in data["items"] if it.get("matched") and it.get("poem_id")]
@@ -98,14 +151,10 @@ async def run(args: argparse.Namespace) -> None:
     created = 0
     skipped = 0
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=30.0) as client:
-        # 拉现有任务，建 source_tag → task_id 映射（断点续跑）
+        # 拉现有任务，收集已建 source_tag（断点续跑依据）
         existing_tags = set()
         if not args.dry_run:
-            r = await client.get("/api/tasks/", params={"page": 1, "page_size": 1000}, headers=headers)
-            for t in r.json().get("items", []):
-                tag = t.get("source_hotspot_title") or ""
-                if tag.startswith("curriculum:primary:"):
-                    existing_tags.add(tag)
+            existing_tags = await fetch_existing_curriculum_tags(client, headers)
 
         for i, it in enumerate(items, 1):
             tag = source_tag(it["no"], it["title"])

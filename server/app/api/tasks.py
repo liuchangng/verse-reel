@@ -103,6 +103,10 @@ async def list_tasks(
             "current_stage": task.current_stage,
             "progress": task.progress,
             "platform": task.platform,
+            # 来源热点标记（curriculum:primary:N 等）。2026-09-14 修复：批量建任务脚本
+            # 靠该字段做断点续跑判定，此前列表项漏返回 ⇒ 脚本 existing_tags 恒空 ⇒
+            # 重复运行会重复建满一遍（change-id=curriculum-resume-tags）。
+            "source_hotspot_title": task.source_hotspot_title,
             "video_url": task.video_url,
             "script_status": "done" if _script_done else ("processing" if task.current_stage == "script" else "pending"),
             "image_status": "done" if _image_done else ("processing" if task.current_stage == "image" else "pending"),

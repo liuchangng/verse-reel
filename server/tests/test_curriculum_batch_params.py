@@ -19,7 +19,9 @@
 
 本模块锁定该契约，防止回归。
 """
+import asyncio
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -73,3 +75,94 @@ def test_source_has_no_comma_join_regression():
     src = SCRIPT_PATH.read_text(encoding="utf-8")
     assert '"platforms": ",".join' not in src, "platforms 不得用逗号串拼接"
     assert '"platforms": list(PLATFORMS)' in src, "platforms 必须以 list 传参"
+
+
+# ---------------------------------------------------------------- #
+# 断点续跑（change-id=curriculum-resume-tags）
+# 旧版静默失效：page_size=1000 → HTTP 422，且列表项缺 source_hotspot_title
+# ---------------------------------------------------------------- #
+
+class _Resp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = json.dumps(payload, ensure_ascii=False)
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    """记录请求参数、按 page 返回对应 items 的假 httpx 客户端。"""
+
+    def __init__(self, pages, status=200):
+        self.pages = pages
+        self.status = status
+        self.calls = []
+
+    async def get(self, url, params=None, headers=None):
+        self.calls.append({"url": url, "params": dict(params or {})})
+        if self.status != 200:
+            return _Resp(self.status, {"detail": "err"})
+        page = int((params or {}).get("page", 1))
+        idx = page - 1
+        payload = self.pages[idx] if 0 <= idx < len(self.pages) else {"items": [], "total": 0}
+        return _Resp(200, payload)
+
+
+def test_resume_collects_tags_across_pages(script):
+    """多页任务必须全部收集，且请求用合法 page_size（接口上限 100）。"""
+    pages = [
+        {"items": [{"source_hotspot_title": f"curriculum:primary:{i}"} for i in range(1, 101)],
+         "total": 150},
+        {"items": [{"source_hotspot_title": f"curriculum:primary:{i}"} for i in range(101, 151)],
+         "total": 150},
+    ]
+    client = _FakeClient(pages)
+    tags = asyncio.run(script.fetch_existing_curriculum_tags(client, {}))
+
+    assert len(tags) == 150
+    assert "curriculum:primary:1" in tags and "curriculum:primary:150" in tags
+    assert [c["params"]["page_size"] for c in client.calls] == [100, 100], \
+        "page_size 必须 ≤100（旧版 1000 直接 422）"
+    assert [c["params"]["page"] for c in client.calls] == [1, 2]
+
+
+def test_resume_ignores_non_curriculum_tags(script):
+    """只认 curriculum:primary: 前缀；热点任务/空值不得参与跳过判定。"""
+    pages = [{"items": [
+        {"source_hotspot_title": "curriculum:primary:5"},
+        {"source_hotspot_title": "某热点标题"},
+        {"source_hotspot_title": None},
+    ], "total": 3}]
+    tags = asyncio.run(script.fetch_existing_curriculum_tags(_FakeClient(pages), {}))
+    assert tags == {"curriculum:primary:5"}
+
+
+def test_resume_fails_loud_on_bad_status(script):
+    """列表接口非 200（如旧版的 422）必须抛错，不得静默当作“无已建”。"""
+    client = _FakeClient([], status=422)
+    with pytest.raises(RuntimeError):
+        asyncio.run(script.fetch_existing_curriculum_tags(client, {}))
+
+
+def test_source_has_no_oversized_page_size():
+    """源码级护栏：不得再出现 page_size 写死 1000（接口 le=100，超限 422）。"""
+    src = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert '"page_size": 1000' not in src
+    assert "PAGE_SIZE_MAX" in src
+
+
+def test_tasks_list_api_exposes_source_hotspot_title():
+    """GET /api/tasks/ 列表项必须暴露 source_hotspot_title（断点续跑的唯一依据）。
+
+    说明：此处用源码级护栏而非打接口——``tests/test_api.py`` 的 client 走的是
+    真实 poems.db，跑一次就会真建一条任务，会污染课标 75 条的现场。
+    功能侧由真实接口探测另行验证（列表项含该字段）。
+    """
+    api_src = (
+        Path(__file__).resolve().parents[1] / "app" / "api" / "tasks.py"
+    ).read_text(encoding="utf-8")
+    assert '"source_hotspot_title": task.source_hotspot_title' in api_src
+
+
