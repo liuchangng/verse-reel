@@ -125,6 +125,18 @@ def resolve_task_tier(platforms: list[str] | None = None) -> str:
     return "S" if "S" in tiers else ("L" if "L" in tiers else "S")
 
 
+def resolve_task_tiers(platforms: list[str] | None = None) -> set[str]:
+    """任务涉及的档位集合（去重），供逐档生成（选项 A 真·分平台生成）使用。
+
+    不再"含 S 即取 S"收敛到单一档——混合平台任务（如 douyin+bilibili）应分别
+    生成 S、L 两份 script+storyboard，各平台成片时长/结构贴合其档位目标
+    （douyin 25–40s / bilibili 90–150s）。空集回退 settings.output_platforms
+    解析的档位集合；未知平台随 tier_of 兜底 S。
+    """
+    plats = [p for p in (platforms or []) if p] or getattr(settings, "output_platforms", None) or ["douyin"]
+    return {tier_of(p) for p in plats}
+
+
 class Settings(BaseSettings):
     """应用配置"""
     

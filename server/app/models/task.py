@@ -34,7 +34,11 @@ class Task(Base):
     publish_copies = Column(Text, nullable=True, comment="各平台发布文案(JSON)")
     script = Column(Text, comment="生成的文案脚本")
     script_score = Column(Integer, comment="文案评分")
-    storyboard = Column(Text, comment="分镜JSON数据")
+    storyboard = Column(Text, comment="分镜JSON数据(主档, 兼容字段)")
+    # 各档位分镜 + 文案（选项 A 真·分平台生成）：{tier: {script, script_score, storyboard}}
+    # 任务含多档平台时逐档独立生成；storyboard/script 留"主档"(主平台档位)兼容值，
+    # 其余档位存于此，供渲染/回填阶段按平台档位取用。迁移由 migrate_schema 自动加列。
+    storyboards_json = Column(Text, nullable=True, comment="各档位分镜+文案JSON({tier:{script,script_score,storyboard}})")
     style = Column(String(30), comment="文案风格(用于图片/视频提示词前缀, 跨阶段复用)")
     voice_preset = Column(String(32), default="", comment="自动选择的配音 preset id（LLM 推荐 + 标题兜底；空=用默认/全局参考音频）")
     character_description = Column(Text, comment="角色外貌描述(用于定妆照+分镜图一致性)")

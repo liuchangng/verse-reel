@@ -37,11 +37,19 @@ class TestPipelinePendingReview:
         Session = async_sessionmaker(engine, expire_on_commit=False)
 
         # mock 阶段方法（避免调用真实 AI API）
-        async def fake_script(*a, **k):
-            from app.services.critic import ScoreResult
-            return "床前明月光，疑是地上霜。", ScoreResult(score=8.0, passed=True, feedback="ok")
-        async def fake_storyboard(*a, **k):
-            return [{"time": "0-5s", "description": "画面"}]
+        from app.services import pipeline as pmod
+        from app.services.critic import ScoreResult
+        async def fake_script_gen(*a, **k):
+            # critic_service.generate_script 签名：poem_title/poem_content/author/dynasty/custom_prompt/keywords
+            kw = {key: v for key, v in k.items() if key in ("poem_title","poem_content","author","dynasty","custom_prompt","keywords")}
+            # 按 custom_prompt 档位段判档（L 档段含 "L 深档"）
+            tier = "L" if "L 深档" in (kw.get("custom_prompt") or "") else "S"
+            return f"{tier} 档文案「金句」。"
+        async def fake_score(*a, **k):
+            return ScoreResult(score=8.0, passed=True, feedback="ok")
+        async def fake_storyboard_json(*a, **k):
+            import json as _json
+            return _json.dumps([{"time": "0-5s", "description": "画面", "narration": "床前明月光"}])
         async def fake_chars(*a, **k):
             return {"ref": "http://char/1.jpg", "description": "李白，唐代诗人"}
         async def fake_images(*a, **k):
@@ -53,8 +61,9 @@ class TestPipelinePendingReview:
         async def fake_subtitle(*a, **k):
             return "http://video/1.mp4"
 
-        monkeypatch.setattr(pipeline_engine, "_generate_script", fake_script)
-        monkeypatch.setattr(pipeline_engine, "_generate_storyboard", fake_storyboard)
+        monkeypatch.setattr(pmod.critic_service, "generate_script", fake_script_gen)
+        monkeypatch.setattr(pmod.critic_service, "score_script", fake_score)
+        monkeypatch.setattr(pmod.critic_service, "generate_storyboard", fake_storyboard_json)
         monkeypatch.setattr("app.services.character.character_service.generate_character_reference", fake_chars)
         monkeypatch.setattr(pipeline_engine, "_generate_images", fake_images)
         monkeypatch.setattr(pipeline_engine, "_generate_video", fake_video)

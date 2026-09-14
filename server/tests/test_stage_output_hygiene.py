@@ -8,6 +8,7 @@
 - script 重跑 → 下游产物全清（文案是全链源头）；
 - video 缺分镜图 → 直接失败（fail-loud），不做定妆照兜底。
 """
+import json
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
@@ -16,6 +17,7 @@ from app.database import Base
 from app.models.task import Task
 from app.models.poem import Poem
 from app.services.critic import ScoreResult
+from app.services import pipeline as pipeline_mod
 from app.services.pipeline import pipeline_engine
 
 
@@ -31,17 +33,21 @@ async def hygiene_env(monkeypatch):
                    content="床前明月光，疑是地上霜。"))
         await s.commit()
 
-    async def fake_generate_script(db, task, poem, style, keywords):
-        script_text = "文案正文「金句」。"
-        task.script = script_text
-        await db.commit()
-        return script_text, ScoreResult(score=8.0, passed=True, feedback="ok")
+    class _FakeCritic:
+        async def generate_script(self, *a, **k):
+            return "文案正文「金句」。"
+        async def score_script(self, *a, **k):
+            return ScoreResult(score=8.0, passed=True, feedback="ok")
+        async def generate_storyboard(self, *a, **k):
+            return json.dumps([{"time": "0-3s", "description": "月夜", "narration": "床前明月光"}],
+                              ensure_ascii=False)
 
-    async def fake_storyboard(script, tier="S"):
-        return [{"time": "0-3s", "description": "月夜", "narration": "床前明月光"}]
+    async def fake_recommend(_poem):
+        return "preset-test"
 
-    monkeypatch.setattr(pipeline_engine, "_generate_script", fake_generate_script)
-    monkeypatch.setattr(pipeline_engine, "_generate_storyboard", fake_storyboard)
+    monkeypatch.setattr(pipeline_mod, "critic_service", _FakeCritic())
+    from app.services import voice_selector as _vs
+    monkeypatch.setattr(_vs, "recommend", fake_recommend)
     yield factory
     await engine.dispose()
 

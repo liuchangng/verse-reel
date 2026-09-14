@@ -18,12 +18,13 @@ from app.database import Base
 from app.models.task import Task
 from app.models.poem import Poem
 from app.services.critic import ScoreResult
+from app.services import pipeline as pipeline_mod
 from app.services.pipeline import pipeline_engine
 
 
 @pytest_asyncio.fixture()
 async def sb_env(monkeypatch):
-    """内存库 + mock 掉文案/分镜生成，捕获分镜入参。"""
+    """内存库 + mock 掉 critic_service（逐档生成在 critic 边界被 mock），捕获分镜入参。"""
     engine = create_async_engine("sqlite+aiosqlite://")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -32,25 +33,32 @@ async def sb_env(monkeypatch):
     async with factory() as s:
         s.add(Poem(id=1, title="静夜思", author="李白", dynasty="唐",
                    content="床前明月光，疑是地上霜。"))
-        s.add(Task(id=1, poem_id=1, platform="douyin"))
+        s.add(Task(id=1, poem_id=1, platform="douyin",
+                   platforms=json.dumps(["douyin"])))  # 仅 douyin → S 单档
         await s.commit()
 
     captured = {}
 
-    async def fake_generate_script(db, task, poem, style, keywords):
-        script_text = "文案正文「金句」。"
-        # 模拟真实行为：文案在 _generate_script 内部先落库（早于阶段完成）
-        task.script = script_text
-        await db.commit()
-        return script_text, ScoreResult(score=8.0, passed=True, feedback="ok")
+    class _FakeCritic:
+        async def generate_script(self, poem_title, poem_content, author, dynasty,
+                                  custom_prompt="", keywords=None):
+            return "文案正文「金句」。"
 
-    async def fake_storyboard(script, tier="S"):
-        captured["script"] = script
-        captured["tier"] = tier
-        return [{"time": "0-3s", "description": "月夜", "narration": "床前明月光"}]
+        async def score_script(self, script, tier="S"):
+            return ScoreResult(score=8.0, passed=True, feedback="ok")
 
-    monkeypatch.setattr(pipeline_engine, "_generate_script", fake_generate_script)
-    monkeypatch.setattr(pipeline_engine, "_generate_storyboard", fake_storyboard)
+        async def generate_storyboard(self, script, tier="S"):
+            captured["script"] = script
+            captured["tier"] = tier
+            return json.dumps([{"time": "0-3s", "description": "月夜", "narration": "床前明月光"}],
+                              ensure_ascii=False)
+
+    async def fake_recommend(_poem):
+        return "preset-test"
+
+    monkeypatch.setattr(pipeline_mod, "critic_service", _FakeCritic())
+    from app.services import voice_selector as _vs
+    monkeypatch.setattr(_vs, "recommend", fake_recommend)
     yield factory, captured
     await engine.dispose()
 
@@ -77,13 +85,15 @@ async def test_script_score_fail_skips_storyboard(sb_env, monkeypatch):
     """文案评分未达标 → 提前返回，不生成分镜（保持清空态）"""
     factory, _ = sb_env
 
-    async def fake_generate_script_fail(db, task, poem, style, keywords):
-        script_text = "不合格文案。"
-        task.script = script_text
-        await db.commit()
-        return script_text, ScoreResult(score=3.0, passed=False, feedback="不合格")
+    class _FailCritic:
+        async def generate_script(self, *a, **k):
+            return "不合格文案。"
+        async def score_script(self, *a, **k):
+            return ScoreResult(score=3.0, passed=False, feedback="不合格")
+        async def generate_storyboard(self, *a, **k):
+            return "[]"
 
-    monkeypatch.setattr(pipeline_engine, "_generate_script", fake_generate_script_fail)
+    monkeypatch.setattr(pipeline_mod, "critic_service", _FailCritic())
 
     async with factory() as db:
         await pipeline_engine.run_stage(db, 1, "script")

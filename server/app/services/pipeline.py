@@ -31,7 +31,7 @@ from app.services.platform_outputs import (
     serialize_platform_outputs,
     primary_video_url,
 )
-from app.config import settings, tier_of, resolve_task_tier, tier_script_guidelines, tier_profile
+from app.config import settings, tier_of, resolve_task_tier, resolve_task_tiers, tier_script_guidelines, tier_profile
 
 logger = logging.getLogger(__name__)
 
@@ -302,11 +302,13 @@ class PipelineEngine:
                 task.error_message = f"文案评分未达标: {score.feedback}"
                 await db.commit()
                 return
-            # 文案变了 → 下游产物全部失效，清空让后续阶段重跑。
+            # 文案/分镜变了 → 下游产物全部失效，清空让后续阶段重跑。
             # 2026-09-09 任务001事故：旧版只清图片侧，残留的旧音频/旧视频既造成
             # 前端"下游已完成"的乱序假象，也会被产物自检复用（旧片配新文案，内容
             # 彻底脱节）。文案是全链源头，重跑即全链失效。
-            task.storyboard = None
+            # 注意：storyboard / storyboards_json / script / script_score 是"本阶段
+            # 新生成"的产物（_generate_script 已逐档生成并落库），不得在此清空——
+            # 否则 image/tts/subtitle 会失去前置分镜。只清真正"下游"的产物。
             task.character_ref = None
             task.image_urls = None
             task.image_score = None
@@ -316,18 +318,12 @@ class PipelineEngine:
             task.subtitle_url = None
             await db.commit()
 
-            # 分镜（storyboard）是 script 阶段的产物之一（STAGE_OUTPUTS["script"]
-            # 含 storyboard；run_pipeline 阶段2 同源逻辑）。2026-09-09 事故：
-            # 旧版此处只清空不生成——分镜生成只存在于 run_pipeline 直跑路径，
-            # 创建任务统一入队后 storyboard 永远为空，image/tts/subtitle 三个
-            # 阶段必然"缺少前置 storyboard"失败。
+            # 分镜（storyboard）由 _generate_script 逐档生成（主档写入 task.storyboard，
+            # 全档写入 task.storyboards_json）。单档任务与旧行为一致；多档任务此处
+            # 已就绪，image/tts/subtitle 三阶段以主档 storyboard 为前置继续。
             task.current_stage = "storyboard"
             await db.commit()
-            sb_tier = resolve_task_tier(self._task_platforms(task))
-            storyboard = await self._generate_storyboard(script_text, tier=sb_tier)
-            task.storyboard = json.dumps(storyboard, ensure_ascii=False)
-            await db.commit()
-            logger.info(f"task{task_id} 分镜生成完成: {len(storyboard)} 镜 (tier={sb_tier})")
+            logger.info(f"task{task_id} 逐档文案/分镜生成完成，主档 storyboard 就绪")
 
         elif stage == "character":
             if _have("character_ref") and not force:
@@ -355,49 +351,81 @@ class PipelineEngine:
                 raise RuntimeError(task.error_message)
 
         elif stage == "image":
-            if _have("image_urls") and not force:
-                logger.info(f"task{task_id} image 已存在，跳过 stage")
+            # 逐档（选项 A）：每个档位用自己的分镜独立生图；各档图片 URL 存回
+            # storyboards_json[tier]["image_urls"]（主档另写 task.image_urls 兼容）。
+            sb_map = self._tier_storyboards(task)
+            main_tier = self._main_tier(task)
+            if not force and _have("image_urls") and all(
+                (e or {}).get("image_urls") for e in sb_map.values()
+            ):
+                logger.info(f"task{task_id} image 已存在（全档），跳过 stage")
                 return
-            storyboard = self._parse_json_list(task.storyboard)
-            if not storyboard:
+            if not sb_map:
                 raise RuntimeError("image 缺少前置 storyboard")
-            image_urls = await self._generate_images(
-                task, storyboard, db,
-                character_ref=task.character_ref,
-                style=style,
-                character_description=task.character_description,
-            )
-            if not image_urls:
-                # 2026-09-13 修复（subtitle-image-align 上游）：CDN 不可达/全部评分未过会
-                # 返回空列表，旧版静默跳过写库，任务继续进入 tts/subtitle 后以"缺图 0 出片"
-                # 失败且错误定位困难。fail-loud：缺分镜图即在此终止，原因可见。
-                task.status = "failed"
-                task.error_message = "分镜图生成失败（image 阶段返回 0 张），已终止以免下游缺图 0 出片"
-                await db.commit()
-                raise RuntimeError(task.error_message)
-            task.image_urls = json.dumps(image_urls, ensure_ascii=False)
-            # 落盘：image 阶段把远程图下载到本地并持久化路径，合成阶段优先读本地，
-            # 彻底摆脱对 agnes CDN 可达性的依赖（2026-09-13 根因修复）
-            local_paths = await self._persist_images_local(task, image_urls)
-            if local_paths:
-                task.image_local_paths = json.dumps(local_paths, ensure_ascii=False)
+            for tier in sorted(sb_map.keys()):
+                entry = sb_map[tier]
+                storyboard = entry.get("storyboard") or []
+                if not storyboard:
+                    logger.warning(f"task{task_id} 档位 {tier} 无分镜，跳过该档生图")
+                    continue
+                label = "" if tier == main_tier else tier
+                image_urls = await self._generate_images(
+                    task, storyboard, db,
+                    character_ref=task.character_ref,
+                    style=style,
+                    character_description=task.character_description,
+                )
+                if not image_urls:
+                    # 2026-09-13 修复（subtitle-image-align 上游）：CDN 不可达/全部评分未过会
+                    # 返回空列表，旧版静默跳过写库，任务继续进入 tts/subtitle 后以"缺图 0 出片"
+                    # 失败且错误定位困难。fail-loud：缺分镜图即在此终止，原因可见。
+                    task.status = "failed"
+                    task.error_message = (
+                        f"分镜图生成失败（档位 {tier} 返回 0 张），已终止以免下游缺图 0 出片"
+                    )
+                    await db.commit()
+                    raise RuntimeError(task.error_message)
+                entry["image_urls"] = image_urls
+                # 落盘：把远程图下载到本地并按档命名（主档 img_{i}.png / 非主档
+                # tier_{T}_img_{i}.png），合成阶段优先读本地，摆脱 CDN 可达性依赖
+                local_paths = await self._persist_images_local(task, image_urls, tier=label)
+                if local_paths:
+                    entry["image_local_paths"] = local_paths
+                if label == "":
+                    task.image_urls = json.dumps(image_urls, ensure_ascii=False)
+                    if local_paths:
+                        task.image_local_paths = json.dumps(local_paths, ensure_ascii=False)
+                logger.info(f"task{task_id} image 阶段完成 (档 {tier}): {len(image_urls)} 张")
+            # 逐档产物回写（含各档 image_urls/image_local_paths）
+            task.storyboards_json = json.dumps(sb_map, ensure_ascii=False)
             if not task.image_score:
                 task.image_score = 8
             await db.commit()
-            logger.info(f"task{task_id} image 阶段完成: {len(image_urls)} 张")
 
         elif stage == "tts":
-            if _have("audio_url") and not force:
+            sb_map = self._tier_storyboards(task)
+            main_tier = self._main_tier(task)
+            multi_tier = len(sb_map) > 1
+            if not force and not multi_tier and _have("audio_url"):
                 logger.info(f"task{task_id} tts 已存在，跳过 stage")
                 return
-            storyboard = self._parse_json_list(task.storyboard)
-            if not storyboard:
+            if not sb_map:
                 raise RuntimeError("tts 缺少前置 storyboard")
-            tts_segments = await self._generate_tts_segments(task, storyboard, db, force=force)
-            if not tts_segments.get("success"):
-                raise RuntimeError(f"tts 生成失败: {tts_segments.get('error')}")
+            for tier in sorted(sb_map.keys()):
+                storyboard = sb_map[tier].get("storyboard") or []
+                if not storyboard:
+                    logger.warning(f"task{task_id} 档位 {tier} 无分镜，跳过该档 TTS")
+                    continue
+                label = "" if tier == main_tier else tier
+                tts_segments = await self._generate_tts_segments(
+                    task, storyboard, db, force=force, tier=label
+                )
+                if not tts_segments.get("success"):
+                    raise RuntimeError(
+                        f"tts 生成失败 (档 {tier}): {tts_segments.get('error')}"
+                    )
+                logger.info(f"task{task_id} tts 阶段完成 (档 {tier})")
             await db.commit()
-            logger.info(f"task{task_id} tts 阶段完成")
 
         elif stage == "video":
             if _have("video_url") and not force:
@@ -421,22 +449,18 @@ class PipelineEngine:
                 raise RuntimeError("video 生成失败：未返回有效 URL")
 
         elif stage == "subtitle":
-            if _have("subtitle_url") and not force:
+            sb_map = self._tier_storyboards(task)
+            multi_tier = len(sb_map) > 1
+            if not force and not multi_tier and _have("subtitle_url"):
                 logger.info(f"task{task_id} subtitle 已存在，跳过 stage")
                 return
-            storyboard = self._parse_json_list(task.storyboard)
-            if not storyboard:
+            if not sb_map:
                 raise RuntimeError("subtitle 缺少前置 storyboard")
-            # 1) 逐镜 TTS（若未生成则补生成；force 时重生成）
-            tts_segments = await self._generate_tts_segments(task, storyboard, db, force=force)
-            if not tts_segments.get("success"):
-                raise RuntimeError(f"tts 生成失败: {tts_segments.get('error')}")
-            # 2) 多平台 seg 合成 + 烧字幕（与 run_pipeline 共用渲染循环，
-            #    按比例分组共享 base；2026-09-10 任务005：旧版此处只渲染
-            #    task.platform 单平台，设置页勾 3 平台也只出 1 个成片）
+            # 逐档渲染：每档用自己的分镜/图片/TTS（本档 TTS 缺失时在渲染内补生成，
+            # 已生成则复用），主档产物即前端 primary 展示。与 run_pipeline 共用同一
+            # 渲染入口，消除两套实现漂移（2026-09-10 任务005）。
             platform_urls = await self._render_platform_outputs(
-                task, storyboard, tts_segments,
-                poem_content=poem.content if poem else None,
+                task, poem_content=poem.content if poem else None,
             )
             if not platform_urls:
                 raise RuntimeError("视频片段合成失败（所有比例组均未产出成片）")
@@ -535,17 +559,19 @@ class PipelineEngine:
                 task.error_message = f"文案评分未达标: {script_score.feedback}"
                 await db.commit()
                 return
-            
-            # 阶段2: 生成分镜（文案/分镜链统一按任务平台解析的档位走）
+
+            # 阶段2: 逐档生成（文案+分镜）已由 _generate_script 完成——
+            # 主档写入 task.storyboard/task.script，全档写入 task.storyboards_json。
+            # 旧版此处单档 resolve_task_tier 再生成一次，选项 A 下由 _generate_script
+            # 统一逐档生成（见下方注释），此处仅读主档 storyboard 供下游链复用。
             task.current_stage = "storyboard"
             task.progress = 30
             await db.commit()
 
-            sb_tier = resolve_task_tier(self._task_platforms(task))
-            storyboard = await self._generate_storyboard(script_text, tier=sb_tier)
-            task.storyboard = json.dumps(storyboard, ensure_ascii=False)
-            await db.commit()
-            
+            storyboard = self._parse_json_list(task.storyboard)
+            if not storyboard:
+                raise RuntimeError("逐档生成后主档 storyboard 为空（不应发生）")
+
             # 阶段2.5: 生成角色定妆照
             # 注意：generate_character_reference 返回 dict {ref, description, name}，
             # 其中 ref 才是定妆照 URL（i2i 参考图），不可把整个 dict 直接写库。
@@ -560,25 +586,50 @@ class PipelineEngine:
             if character_ref:
                 logger.info(f"角色定妆照生成完成: {character_ref}")
 
-            # 阶段3: 生成图片 + 打分（使用角色参考图 + 角色描述注入一致性）
+            # 阶段3: 生成图片 + 打分（逐档：每档用自己的分镜独立生图；选项 A）
             task.current_stage = "image"
             task.progress = 40
             await db.commit()
 
-            image_urls = await self._generate_images(
-                task, storyboard, db,
-                character_ref=character_ref,
-                style=style,
-                character_description=character_result.get("description"),
-            )
-            logger.info(f"生成图片完成: {len(image_urls)} 张")
-
-            # 回写图片 URL 到任务
-            if image_urls:
-                task.image_urls = json.dumps(image_urls, ensure_ascii=False)
-                # 取首张图片评分作为整体图片评分
-                if not task.image_score:
-                    task.image_score = 8  # 默认通过分
+            main_tier = self._main_tier(task)
+            tier_sb_map = self._tier_storyboards(task)
+            tier_image_urls: dict[str, list] = {}
+            for _tier in sorted(tier_sb_map.keys()):
+                _entry = tier_sb_map[_tier]
+                _sb = _entry.get("storyboard") or []
+                if not _sb:
+                    logger.warning(f"task{task_id} 档位 {_tier} 无分镜，跳过该档生图")
+                    continue
+                _label = "" if _tier == main_tier else _tier
+                _urls = await self._generate_images(
+                    task, _sb, db,
+                    character_ref=character_ref,
+                    style=style,
+                    character_description=character_result.get("description"),
+                )
+                if not _urls:
+                    # fail-loud（同 run_stage.image）：缺图即终止，避免下游 0 出片
+                    raise RuntimeError(
+                        f"分镜图生成失败（档位 {_tier} 返回 0 张），已终止以免下游缺图 0 出片"
+                    )
+                _entry["image_urls"] = _urls
+                _local = await self._persist_images_local(task, _urls, tier=_label)
+                if _local:
+                    _entry["image_local_paths"] = _local
+                tier_image_urls[_tier] = _urls
+                if _label == "":
+                    task.image_urls = json.dumps(_urls, ensure_ascii=False)
+                    if _local:
+                        task.image_local_paths = json.dumps(_local, ensure_ascii=False)
+                logger.info(
+                    f"task{task_id} 生成图片完成 (档 {_tier}): {len(_urls)} 张"
+                )
+            # 逐档产物（含各档 image_urls/image_local_paths）回写
+            task.storyboards_json = json.dumps(tier_sb_map, ensure_ascii=False)
+            image_urls = tier_image_urls.get(main_tier) or []
+            # 取首张图片评分作为整体图片评分
+            if image_urls and not task.image_score:
+                task.image_score = 8  # 默认通过分
             await db.commit()
             
             # 阶段4: 生成视频（使用平台配置的尺寸）
@@ -599,14 +650,24 @@ class PipelineEngine:
                 task.video_url = video_url
                 await db.commit()
             
-            # 阶段5: TTS 配音
+            # 阶段5: TTS 配音（逐档：各档旁白独立生成，产物按档前缀隔离）
             task.current_stage = "tts"
             task.progress = 75
             await db.commit()
+
+            for _tier in sorted(tier_sb_map.keys()):
+                _sb = tier_sb_map[_tier].get("storyboard") or []
+                if not _sb:
+                    continue
+                _label = "" if _tier == main_tier else _tier
+                _tts = await self._generate_tts_segments(task, _sb, db, tier=_label)
+                if not _tts.get("success"):
+                    raise RuntimeError(
+                        f"tts 生成失败 (档 {_tier}): {_tts.get('error')}"
+                    )
+                logger.info(f"task{task_id} tts 阶段完成 (档 {_tier})")
             
-            tts_segments = await self._generate_tts_segments(task, storyboard, db)
-            
-            # 阶段6: 字幕烧录（多平台：TTS/图片/SRT 复用，按分辨率分别合成）
+            # 阶段6: 字幕烧录（逐档：每档用自己的分镜/图片/TTS 渲染，选项 A）
             task.current_stage = "subtitle"
             task.progress = 90
             await db.commit()
@@ -614,9 +675,9 @@ class PipelineEngine:
             # 本任务选中的平台优先；未指定则回退全局 settings.output_platforms（系统设置页配置）。
             # 与文案链 _generate_script 共用 _task_platforms 解析（口径一致）。
             # 渲染循环抽至 _render_platform_outputs（与 run_stage.subtitle 共用，
-            # 2026-09-10 任务005 消除两套实现漂移）。
+            # 2026-09-10 任务005 消除两套实现漂移；2026-09-13 升级为逐档渲染）。
             platform_urls = await self._render_platform_outputs(
-                task, storyboard, tts_segments, poem_content=poem.content,
+                task, poem_content=poem.content,
             )
             
             # 完成自动阶段 → 进入待人工审核（Q2A：发布前审核）
@@ -655,91 +716,224 @@ class PipelineEngine:
         与渲染段共用同一解析（video-comm 决策 1：文案链按任务平台解析档位）。
 
         兼容旧数据（2026-09-14 多平台成片 REQ-M1 存量升级）：早期任务把多平台以逗号串
-        存于 ``task.platform``（如 ``"douyin,bilibili"``），``task.platforms`` 未填。
-        此时按逗号拆分取其真实目标平台，避免回退到全局默认平台列表导致重渲染出的
-        平台与任务实际不符（存量任务重跑 subtitle 拿不到各平台独立成片）。
+        存于 ``task.platform``（如 ``"douyin,bilibili"``），``task.platforms`` 未填；另有
+        部分任务把整串逗号直接包成**单元素 JSON 数组** ``'["douyin,bilibili"]'``（逗号串
+        被当成「一个平台名」）。两种畸形都必须归一为真实多平台列表，否则重渲染出的平台
+        与任务实际不符——只出 9:16 单成片、``platform_outputs`` 因 ``len==1`` 不写
+        （pilot 实测 75 个旧任务全中此坑）。
 
-        仅当 ``task.platform`` 确实含逗号时才走逗号兜底——单平台 ``task.platform``
-        （如 ``"douyin"``）不触发，继续回退全局默认，避免改变单平台任务的既有行为。
+        解析规则：
+        - ``task.platforms`` 为 JSON 数组 → 逐元素再按逗号拆分（同时覆盖
+          ``["douyin,bilibili"]`` 与 ``["douyin","bilibili"]`` 两种写法），去重保序；
+        - ``task.platforms`` 为字符串 → 按逗号拆分；
+        - 以上均无有效平台时，回退 ``task.platform`` 逗号串（仅当确含逗号）；
+        - 单平台 ``task.platform``（无逗号）不触发，继续回退全局默认（保持既有单平台行为）。
         """
+        def _split(text) -> list[str]:
+            out = []
+            for part in str(text).split(","):
+                part = part.strip()
+                if part:
+                    out.append(part)
+            return out
+
+        plats: list[str] = []
         raw = getattr(task, "platforms", None)
         if raw:
             try:
-                plats = json.loads(raw) or []
-                if plats:
-                    return plats
+                parsed = json.loads(raw)
             except (TypeError, ValueError):
-                pass
-        # 旧数据兜底：仅当 platform 确为逗号串（legacy 多平台）才按逗号拆分
-        legacy = getattr(task, "platform", None)
-        if legacy and "," in str(legacy):
-            plats = [p.strip() for p in str(legacy).split(",") if p.strip()]
-            if plats:
-                return plats
-        return list(getattr(settings, "output_platforms", None) or ["douyin"])
+                parsed = None
+            if isinstance(parsed, list):
+                for item in parsed:
+                    plats.extend(_split(item))
+            elif isinstance(parsed, str):
+                plats.extend(_split(parsed))
+        if not plats:
+            # 旧数据兜底：仅当 platform 确为逗号串（legacy 多平台）才按逗号拆分
+            legacy = getattr(task, "platform", None)
+            if legacy and "," in str(legacy):
+                plats = _split(legacy)
+        if not plats:
+            return list(getattr(settings, "output_platforms", None) or ["douyin"])
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in plats:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    # ----- 逐档（选项 A）解析辅助 -----
+    def _main_tier(self, task: Task) -> str:
+        """主档位 = 主平台(task.platform)所属档位；主平台不在任务平台内则取最小档。
+
+        与 `_generate_script` 判定主档的规则完全一致（单一事实源），保证
+        storyboards_json 的"主档兼容字段"与渲染时"主档命名(无前缀)"指向同档。
+        """
+        plats = self._task_platforms(task)
+        main_plat = (task.platform or "douyin").lower()
+        if main_plat in [p.lower() for p in plats]:
+            return tier_of(main_plat)
+        tiers = sorted(resolve_task_tiers(plats))
+        return tiers[0] if tiers else "S"
+
+    def _tier_platforms(self, task: Task) -> dict[str, list[str]]:
+        """任务平台按档位分组：{tier: [platform,...]}（保序、去重）。
+
+        例：["douyin","bilibili"] → {"S": ["douyin"], "L": ["bilibili"]}。
+        渲染层据此为每个档位独立走一遍「图片→TTS→seg→烧字幕」。
+        """
+        groups: dict[str, list[str]] = {}
+        for plat in self._task_platforms(task):
+            t = tier_of(plat)
+            bucket = groups.setdefault(t, [])
+            if plat not in bucket:
+                bucket.append(plat)
+        return groups
+
+    def _tier_storyboards(self, task: Task) -> dict[str, dict]:
+        """各档位生成产物：{tier: {script, script_score, storyboard, image_urls?, image_local_paths?}}。
+
+        优先读 `task.storyboards_json`（选项 A 逐档生成的产物）；解析失败或为空时
+        回退为单档条目（用 task.script/storyboard/image_urls 构造主档），保证旧任务
+        与单档任务在渲染层走同一条路径（无需分支）。
+        """
+        raw = getattr(task, "storyboards_json", None)
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict) and data:
+                    out = {}
+                    for k, v in data.items():
+                        if isinstance(v, dict):
+                            out[str(k)] = v
+                    if out:
+                        return out
+            except Exception as exc:
+                logger.warning("task%s storyboards_json 解析失败，回退单档: %s", task.id, exc)
+        main_tier = self._main_tier(task)
+        return {
+            main_tier: {
+                "script": getattr(task, "script", "") or "",
+                "script_score": getattr(task, "script_score", None),
+                "storyboard": self._parse_json_list(getattr(task, "storyboard", None)),
+                "image_urls": self._parse_json_list(getattr(task, "image_urls", None)),
+                "image_local_paths": self._parse_json_list(
+                    getattr(task, "image_local_paths", None)
+                ),
+            }
+        }
+
+    async def _persist_tier_images(
+        self, task: Task, entry: dict, tier_label: str, urls: list | None
+    ) -> list:
+        """确保某档分镜图本地就绪，返回本地路径列表（best-effort，不抛错）。
+
+        复用优先：`entry["image_local_paths"]` 全部存在则直接返回，避免每次渲染都
+        重下整档图片；否则按本档 URL 落盘为 ``[tier_{T}_]img_{i}.png``。
+        """
+        cached = entry.get("image_local_paths") if isinstance(entry, dict) else None
+        if isinstance(cached, list) and cached:
+            alive = [p for p in cached if p and Path(str(p)).exists()]
+            if len(alive) == len(cached):
+                return alive
+        return await self._persist_images_local(task, urls or [], tier=tier_label)
 
     async def _render_platform_outputs(
         self,
         task: Task,
-        storyboard: list[dict],
-        tts_segments: dict,
         poem_content: str | None = None,
     ) -> dict:
-        """多平台成片渲染（run_stage.subtitle 与 run_pipeline 共用循环）。
+        """逐档多平台成片渲染（选项 A：每档用各自的分镜/图片/TTS）。
 
         2026-09-10 任务005：旧版 run_stage.subtitle 只渲染 task.platform 单平台，
         设置页勾选 3 平台也只出 1 个成片——队列主路径与 run_pipeline 直跑路径
         两套实现漂移。现抽成本方法两处共用。
 
-        按画幅比例分组：同比例平台只构建一次 base，组内逐平台烧录 final_{plat}.mp4。
-        例：抖音/快手(9:16) 共享一份 base，小红书(3:4) 独立 → 避免重复 ffmpeg 拼接。
+        2026-09-13 逐档（选项 A）：混合任务（如 douyin S + bilibili L）此前所有平台
+        共用同一份分镜/图片/TTS → B 站深档被渲染成 S 档的 ~30s 短片，与抖音无差别。
+        现按档位分组：**每个档位**独立完成「图片就绪 → 本档 TTS → seg 合成 → 烧字幕」，
+        各档产物以 ``tier_{T}_`` 前缀隔离（主档 tier="" 保持旧命名，兼容旧任务）。
 
         2026-09-14 多平台成片（REQ-M1/M2）：返回值由 {platform: url} 弱契约升级为
         {platform: entry} 产物对象（platform_outputs 一等模型）：
         - 成功: {"url": final_url, "ratio": ar, "duration": sec, "status": "ok"}
         - 失败: {"ratio": ar, "status": "failed", "error": 原因}（base 缺失或烧录失败）
         entry 统一保留比例与时长（成功/失败都有），供前端展示画幅与预估时长。
-        返回空 dict 仅当「该任务没有任何目标平台」，各比例组失败时对应平台 entry
+        返回空 dict 仅当「该任务没有任何目标平台」，各档/各比例组失败时对应平台 entry
         以 status=failed 形式存在（不再静默丢弃，调用方据此 fail-loud/标记失败）。
         """
-        platforms = self._task_platforms(task)
+        plat_by_tier = self._tier_platforms(task)
+        sb_map = self._tier_storyboards(task)
+        main_tier = self._main_tier(task)
         platform_urls: dict = {}
-        # 按画幅比例分组（视频渲染的分辨率由比例决定，与平台无关）
-        ar_groups: dict[str, list[str]] = {}
-        for plat in platforms:
-            ar = PLATFORM_CONFIG.get(plat, PLATFORM_CONFIG["douyin"])["aspect_ratio"]
-            ar_groups.setdefault(ar, []).append(plat)
-        for ar, plats in ar_groups.items():
-            rep = plats[0]  # 组内代表平台（base 文件以其命名）
-            W, H = final_resolution(rep)
-            logger.info(f"task{task.id} 比例组 {ar}: 平台 {plats} → 构建一次 base({rep}) {W}x{H}")
-            segs = await self._build_segments(task, storyboard, tts_segments, W, H,
-                                              platform=rep)
-            if not segs.get("ok"):
-                # base 合成失败 → 组内所有平台记 failed（reason 可见，不再静默跳过）
-                reason = "比例组 base 合成失败"
-                logger.warning(f"task{task.id} 比例组 {ar} base 合成失败，组内 {plats} 标记 failed: {reason}")
+        # 逐档渲染：主档最先（其产物即前端 primary 展示），其余档按字母序
+        tier_order = sorted(plat_by_tier.keys(), key=lambda t: (t != main_tier, t))
+        for tier in tier_order:
+            plats = plat_by_tier[tier]
+            # 主档用旧命名（无前缀），非主档加 tier_{T}_ 前缀
+            label = "" if tier == main_tier else tier
+            entry = sb_map.get(tier) or sb_map.get(main_tier) or {}
+            storyboard = entry.get("storyboard") or self._parse_json_list(task.storyboard)
+            tier_imgs = entry.get("image_urls") if isinstance(entry, dict) else None
+            if not tier_imgs and label == "":
+                tier_imgs = self._parse_json_list(task.image_urls)
+            # 1) 本档图片就绪（各档独立命名，S/L 互不覆盖）
+            await self._persist_tier_images(task, entry, label, tier_imgs)
+            # 2) 本档 TTS（各档 narration 独立；已生成则复用）
+            tts_segments = await self._generate_tts_segments(
+                task, storyboard, None, tier=label
+            )
+            if not tts_segments.get("success"):
+                reason = f"档位 {tier} TTS 生成失败: {tts_segments.get('error')}"
+                logger.warning(f"task{task.id} {reason}，平台 {plats} 标记 failed")
                 for plat in plats:
+                    ar = PLATFORM_CONFIG.get(plat, PLATFORM_CONFIG["douyin"])["aspect_ratio"]
                     platform_urls[plat] = {"ratio": ar, "status": FAILED, "error": reason}
                 continue
-            duration = round(float(segs.get("duration") or 0), 1) or None
+            # 3) 本档内按画幅比例分组（同比例共享一次 base 拼接）
+            ar_groups: dict[str, list[str]] = {}
             for plat in plats:
-                final_url = await self._burn_subtitles(
-                    task, segs["base"], storyboard, segs, W, H,
-                    platform=plat, poem_content=poem_content,
+                ar = PLATFORM_CONFIG.get(plat, PLATFORM_CONFIG["douyin"])["aspect_ratio"]
+                ar_groups.setdefault(ar, []).append(plat)
+            for ar, group in ar_groups.items():
+                rep = group[0]  # 组内代表平台（base 文件以其命名）
+                W, H = final_resolution(rep)
+                logger.info(
+                    f"task{task.id} 档位 {tier} 比例组 {ar}: 平台 {group} → "
+                    f"构建一次 base({rep}) {W}x{H}"
                 )
-                if final_url:
-                    platform_urls[plat] = {
-                        "url": final_url,
-                        "ratio": ar,
-                        "duration": duration,
-                        "status": OK,
-                    }
-                    logger.info(f"task{task.id} 平台 {plat}: ✅ {final_url}")
-                else:
-                    reason = "字幕烧录失败（final 未产出）"
-                    platform_urls[plat] = {"ratio": ar, "status": FAILED, "error": reason}
-                    logger.warning(f"task{task.id} 平台 {plat}: 烧录失败")
+                segs = await self._build_segments(
+                    task, storyboard, tts_segments, W, H,
+                    platform=rep, tier=label, image_urls=tier_imgs,
+                )
+                if not segs.get("ok"):
+                    # base 合成失败 → 组内所有平台记 failed（reason 可见，不再静默跳过）
+                    reason = f"档位 {tier} 比例组 base 合成失败"
+                    logger.warning(f"task{task.id} {reason}，组内 {group} 标记 failed")
+                    for plat in group:
+                        platform_urls[plat] = {"ratio": ar, "status": FAILED, "error": reason}
+                    continue
+                duration = round(float(segs.get("duration") or 0), 1) or None
+                for plat in group:
+                    final_url = await self._burn_subtitles(
+                        task, segs["base"], storyboard, segs, W, H,
+                        platform=plat, poem_content=poem_content,
+                        tier_script=entry.get("script"), tier=label,
+                    )
+                    if final_url:
+                        platform_urls[plat] = {
+                            "url": final_url,
+                            "ratio": ar,
+                            "duration": duration,
+                            "status": OK,
+                        }
+                        logger.info(f"task{task.id} 平台 {plat} (档 {tier}): ✅ {final_url}")
+                    else:
+                        reason = "字幕烧录失败（final 未产出）"
+                        platform_urls[plat] = {"ratio": ar, "status": FAILED, "error": reason}
+                        logger.warning(f"task{task.id} 平台 {plat} (档 {tier}): 烧录失败")
         return platform_urls
 
     async def _generate_script(
@@ -750,27 +944,83 @@ class PipelineEngine:
         style: str = "人生感悟",
         keywords: list[str] | None = None,
     ) -> tuple[str, ScoreResult]:
-        """
-        生成并评分文案（带重试）
-        
-        Returns:
-            (文案文本, 评分结果)
-        """
-        # video-comm 文案改造轮（W3）：档位段前置注入。tier 由任务平台解析
-        # （本轮默认产出 douyin/kuaishou/xiaohongshu → S 快档三段式 80–130 字；
-        # L 五段预案已随 config.TIER_SCRIPT_STRUCTURE 就位，扩展时自动生效）。
-        task_plats = self._task_platforms(task)
-        tier = resolve_task_tier(task_plats)
-        logger.info(f"task{task.id} 文案档位解析: tier={tier} (platforms={task_plats})")
+        """逐档生成并存储文案 + 分镜（选项 A 真·分平台生成）。
 
+        任务含多档平台（如 douyin S + bilibili L）时，按去重后的档位集合逐档
+        调 LLM 生成 script+storyboard（混合任务 LLM 调用 2×，用户已接受保真成本）；
+        单档任务退化为一次生成，与旧行为一致。
+
+        存储契约：
+        - ``task.storyboards_json``：{tier: {script, script_score, storyboard}}，全档；
+        - ``task.storyboard`` / ``task.script`` / ``task.script_score``：主档
+          （主平台 task.platform 的档位；主平台不在任务平台内则取最小档如 S），兼容字段。
+
+        Returns:
+            (主档文案文本, 主档评分结果)。
+        """
+        task_plats = self._task_platforms(task)
+        tiers = sorted(resolve_task_tiers(task_plats))
+        main_plat = (task.platform or "douyin").lower()
+        main_tier = tier_of(main_plat) if main_plat in [p.lower() for p in task_plats] else tiers[0]
+        logger.info(
+            f"task{task.id} 逐档生成: tiers={tiers} (platforms={task_plats}, 主档={main_tier})"
+        )
+
+        storyboards_json: dict[str, dict] = {}
+        score_map: dict[str, ScoreResult] = {}
+        for tier in tiers:
+            script_text, score_result, shots = await self._generate_tier_script(
+                db, task, poem, style, tier, keywords,
+            )
+            storyboards_json[tier] = {
+                "script": script_text,
+                "script_score": score_result.score,
+                "storyboard": shots,
+            }
+            score_map[tier] = score_result
+
+        main_entry = storyboards_json[main_tier]
+        main_score = score_map[main_tier]
+
+        # 主档文案 + 评分恒落库（兼容旧读点 task.script / task.script_score）。
+        task.script = main_entry["script"]
+        task.script_score = main_entry["script_score"]
+        # 分镜仅当主档评分通过才落库：评分未达标时 run_stage/run_pipeline 会
+        # 把任务置 failed 并 return，下游 image/tts/subtitle 不会继续；此时若
+        # 已写 storyboards_json / task.storyboard，会残留"不合格文案的分镜"。
+        if main_score.passed:
+            task.storyboards_json = json.dumps(storyboards_json, ensure_ascii=False)
+            task.storyboard = json.dumps(main_entry["storyboard"], ensure_ascii=False)
+        await db.commit()
+
+        # 返回主档（旧契约：调用方据此判断是否通过）
+        return main_entry["script"], main_score
+
+    async def _generate_tier_script(
+        self,
+        db: AsyncSession,
+        task: Task,
+        poem: Poem,
+        style: str,
+        tier: str,
+        keywords: list[str] | None = None,
+    ) -> tuple[str, ScoreResult, list[dict]]:
+        """单档文案+分镜生成（带重试），返回 (文案, 评分, 分镜)。
+
+        原 _generate_script 的单档逻辑：档位段前置注入 + 风格段；critic_service
+        生成并评分（每档独立重试）；通过后生成本档分镜。不直接写 task.storyboard /
+        task.script（那些是主档兼容字段，由 _generate_script 统一写）。
+        """
+        # video-comm 文案改造轮（W3）：档位段前置注入（结构/字数/时长/金句句界）
+        # + 风格段（prompt_optimizer 风格语气模板）
+        style_prompt = prompt_optimizer.get_creator_prompt(style)
+        creator_prompt = f"{tier_script_guidelines(tier)}\n\n【语气风格】\n{style_prompt}"
+
+        score_result: ScoreResult
+        script_text = ""
         for attempt in range(settings.max_retries):
-            logger.info(f"生成文案 (尝试 {attempt + 1}/{settings.max_retries}, 风格: {style}, 档位: {tier})")
-            
-            # 组装完整 system prompt = 档位段（硬约束前置，结构/字数/时长/金句句界）
-            # + 风格段（prompt_optimizer 风格语气模板）
-            style_prompt = prompt_optimizer.get_creator_prompt(style)
-            creator_prompt = f"{tier_script_guidelines(tier)}\n\n【语气风格】\n{style_prompt}"
-            
+            logger.info(f"task{task.id} 生成文案 (tier={tier}, 尝试 {attempt + 1}/{settings.max_retries}, 风格: {style})")
+
             # 生成文案
             script_text = await critic_service.generate_script(
                 poem_title=poem.title,
@@ -780,43 +1030,40 @@ class PipelineEngine:
                 custom_prompt=creator_prompt,
                 keywords=keywords,
             )
-            
+
             # 评分（按档位选独立评审卡：S 快档三段式 80-130 字 / L 深档五段式 300-450 字）
             score_result = await critic_service.score_script(script_text, tier=tier)
-            logger.info(f"文案评分: {score_result.score}/10 - {'通过' if score_result.passed else '未通过'}")
-            
+            logger.info(f"task{task.id} 文案评分 (tier={tier}): {score_result.score}/10 - {'通过' if score_result.passed else '未通过'}")
+
             # 保存文案（评分 0-10 浮点数）
-            script = Script(
+            db.add(Script(
                 task_id=task.id,
                 full_script=script_text,
                 score=int(score_result.score),
                 score_feedback=score_result.feedback,
                 retry_count=attempt,
-            )
-            db.add(script)
-            
-            # 更新任务文案和评分
-            task.script = script_text
-            task.script_score = score_result.score
+            ))
 
-            # 自动选音色（LLM 推荐为主 + 标题兜底）；失败留空，
-            # TTS 阶段回退 config.default_voice_preset → 全局参考音频。
-            try:
-                from app.services.voice_selector import recommend as _recommend_voice
-                task.voice_preset = await _recommend_voice(poem)
-                logger.info("自动选音色: poem=%s -> preset=%r",
-                            getattr(poem, "title", ""), task.voice_preset)
-            except Exception as _ve:
-                logger.warning("音色自动选择失败，留空: %s", _ve)
-                task.voice_preset = ""
+            # 自动选音色（LLM 推荐为主 + 标题兜底）；音色是任务级唯一，仅首档
+            # 最低档（sorted[0]，通常是 S）写入一次，避免逐档重复调用 LLM。
+            if tier == sorted(tier_of(p) for p in self._task_platforms(task))[0]:
+                try:
+                    from app.services.voice_selector import recommend as _recommend_voice
+                    task.voice_preset = await _recommend_voice(poem)
+                    logger.info("自动选音色: poem=%s -> preset=%r",
+                                getattr(poem, "title", ""), task.voice_preset)
+                except Exception as _ve:
+                    logger.warning("音色自动选择失败，留空: %s", _ve)
+                    task.voice_preset = ""
 
             await db.commit()
-            
+
             if score_result.passed:
-                return script_text, score_result
-        
-        # 所有重试都失败
-        return script_text, score_result
+                break
+
+        # 本档分镜
+        shots = await self._generate_storyboard(script_text, tier=tier)
+        return script_text, score_result, shots
     
     async def _generate_storyboard(self, script: str, tier: str = "S") -> list[dict]:
         """生成分镜（每镜含 narration 纯中文旁白）。
@@ -1078,11 +1325,18 @@ class PipelineEngine:
         return "\x1f".join(parts)
 
     async def _generate_tts_segments(
-        self, task: Task, storyboard: list[dict], db: AsyncSession, force: bool = False
+        self, task: Task, storyboard: list[dict], db: AsyncSession | None = None,
+        force: bool = False, tier: str = "",
     ) -> dict:
-        """逐镜 TTS：对每镜 narration 单独生成旁白，产出 narration_{i}.mp3 + tts_segments.json。        以图定音：每段旁白独立成文件，时长由 TTS 真实决定（ffprobe），
+        """逐镜 TTS：对每镜 narration 单独生成旁白，产出 narration_{i}.mp3 + tts_segments.json。
+
+        以图定音：每段旁白独立成文件，时长由 TTS 真实决定（ffprobe），
         后续 _build_segments 用 -shortest 让画面严格贴合旁白，时长天然精准，
         不再出现整段 TTS 倒推幻灯片导致的截断/错位。
+
+        tier 参数：逐档生成（选项 A）时各档位 TTS 产物按 tier 前缀隔离，避免
+        S/L 两档的 narration/tts_segments 文件互相覆盖。空 tier = 主档（兼容
+        旧命名 narration_{i}.mp3 / tts_segments.json）。
 
         Returns: {"success": bool, "segments":[{index,text,duration,path}],
                   "audio_url": 合并音频URL, "total_duration": float}
@@ -1090,6 +1344,9 @@ class PipelineEngine:
         import re as _re
         output_dir = Path(settings.output_dir) / f"task_{task.id}"
         output_dir.mkdir(parents=True, exist_ok=True)
+        # 逐档（选项 A）：非主档 TTS 产物加 tier 前缀隔离（如 tier_L_narration_{i}.mp3 /
+        # tier_L_tts_segments.json），主档（tier=""）保持旧命名。
+        _tp = f"tier_{tier}_" if tier else ""
         segs = []
         for i, item in enumerate(storyboard):
             text = (item.get("narration") or item.get("description") or "").strip()
@@ -1105,7 +1362,7 @@ class PipelineEngine:
         # 复用已有分段（重跑安全）。复用校验四条全过才可复用：
         # 条数一致 / 逐条文本一致（文案改了不得复用旧旁白）/ 文件存在 /
         # 非静音兜底（fallback 标记或 -80dB 以下数字静音，防历史兜底文件毒化成片）。
-        seg_json = output_dir / "tts_segments.json"
+        seg_json = output_dir / f"{_tp}tts_segments.json"
         # 音色身份指纹：preset 的 ref_wav / 全局参考音 / instruct / 引擎·语速任一变化，
         # 旧旁白视为过期强制重合成（2026-09-10 任务005 修复，见 _tts_voice_fingerprint）。
         cur_fp = self._tts_voice_fingerprint(task)
@@ -1130,7 +1387,9 @@ class PipelineEngine:
                         )
                     else:
                         logger.info(f"task{task.id} TTS 分段已存在，复用")
-                        return await self._finalize_tts(task, existing, output_dir)
+                        # tier 必须透传：非主档复用后仍须写 tier_{T}_audio.mp3，
+                        # 否则 L 档复用会把整合音频落到主档命名、并覆盖 task.audio_url。
+                        return await self._finalize_tts(task, existing, output_dir, tier=tier)
             except Exception as exc:
                 logger.warning("task%s 复用 TTS 分镜校验失败: %s", task.id, exc)
         if not await tts_client.health_check():
@@ -1155,7 +1414,7 @@ class PipelineEngine:
             async with sem:
                 # 默认 mp3；cosyvoice 实际产出 wav，必须用对应后缀，
                 # 否则「wav 内容塞进 .mp3 文件」会让 ffmpeg concat(-c copy) 失败。
-                local = output_dir / f"narration_{idx}.mp3"
+                local = output_dir / f"{_tp}narration_{idx}.mp3"
                 ok = False
                 last_err = None
                 for attempt in range(1, 4):
@@ -1177,7 +1436,7 @@ class PipelineEngine:
                             if path and Path(path).exists():
                                 # 合并后 TTS 同进程，直接读本地产物，省去 HTTP 回环
                                 suffix = Path(path).suffix or ".mp3"
-                                local = output_dir / f"narration_{idx}{suffix}"
+                                local = output_dir / f"{_tp}narration_{idx}{suffix}"
                                 local.write_bytes(Path(path).read_bytes())
                             else:
                                 # 兜底：经 URL 拉取（兼容远程/独立部署场景）
@@ -1187,15 +1446,15 @@ class PipelineEngine:
                                 async with httpx.AsyncClient(timeout=120.0) as client:
                                     resp = await client.get(url)
                                     resp.raise_for_status()
-                                    suffix = Path(url.split("?")[0]).suffix or ".mp3"
-                                    local = output_dir / f"narration_{idx}{suffix}"
-                                    local.write_bytes(resp.content)
+                                suffix = Path(url.split("?")[0]).suffix or ".mp3"
+                                local = output_dir / f"{_tp}narration_{idx}{suffix}"
+                                local.write_bytes(resp.content)
                             dur = await self._probe_duration(local) or (len(text) / 4.0)
                             # 音频清洗：edge-tts raw 噪声底 -45.5dB 本就干净，仅 loudnorm
                             # 统一响度（use_dsp_here=False）；cosyvoice 等确有底噪/DC 偏移
                             # 的音源才走 afftdn+acompressor 全链。失败自动回退原文件。
                             try:
-                                cleaned = output_dir / f"narration_{idx}_clean.wav"
+                                cleaned = output_dir / f"{_tp}narration_{idx}_clean.wav"
                                 if await asyncio.to_thread(
                                     self._clean_audio, local, cleaned, 24000, use_dsp_here
                                 ):
@@ -1249,7 +1508,7 @@ class PipelineEngine:
                     cur = results.get(idx)
                     if cur:
                         cur_path = Path(cur["path"])
-                        cleaned = output_dir / f"narration_{idx}_clean.wav"
+                        cleaned = output_dir / f"{_tp}narration_{idx}_clean.wav"
                         # 静音兜底段无 engine 键 → 按 edge(轻清洗) 处理，避免对静音
                         # 施加强降噪；cosyvoice 段(engine=cosyvoice)保留全链一致性。
                         use_dsp_here = (cur.get("engine") or "edge-tts").lower() not in ("edge-tts", "edge")
@@ -1281,7 +1540,7 @@ class PipelineEngine:
             task.error_message = dw
 
         seg_json.write_text(json.dumps(ordered, ensure_ascii=False), encoding="utf-8")
-        return await self._finalize_tts(task, ordered, output_dir)
+        return await self._finalize_tts(task, ordered, output_dir, tier=tier)
 
     @staticmethod
     def _tts_loudness_gate(task, ordered: list[dict]) -> Optional[dict]:
@@ -1322,25 +1581,30 @@ class PipelineEngine:
         task.error_message = warn
         return None
 
-    async def _finalize_tts(self, task: Task, segments: list[dict], output_dir: Path) -> dict:
+    async def _finalize_tts(self, task: Task, segments: list[dict], output_dir: Path,
+                            tier: str = "") -> dict:
         """合并所有 narration_{i}.* 为 audio.mp3（兼容前端 audio_url），返回总时长。
 
         注意：分段可能混用 .wav（CosyVoice2 零样本克隆，24000Hz）与 .mp3
         （edge-tts / 静音兜底）。concat demuxer 在 -c copy 下要求所有输入
         容器/编码完全一致，wav+mp3 混合会直接失败。因此这里统一重编码为
         libmp3lame，既能混流又保证输出恒为 audio.mp3（前端按 .mp3 加载）。
+
+        tier 参数：非主档（如 L）的中间产物加 tier 前缀隔离（tier_{T}_narration_list.txt
+        / tier_{T}_audio.mp3），主档（tier=""）保持旧命名 audio.mp3 / narration_list.txt。
         """
+        _tp = f"tier_{tier}_" if tier else ""
         total = sum(s.get("duration", 0) for s in segments)
         narration_files = [s["path"] for s in segments if Path(s["path"]).exists()]
         audio_url = task.audio_url
         if narration_files:
             try:
-                listf = output_dir / "narration_list.txt"
+                listf = output_dir / f"{_tp}narration_list.txt"
                 listf.write_text(
                     "\n".join(f"file '{p.replace(chr(92), '/')}'" for p in narration_files),
                     encoding="utf-8",
                 )
-                audio_out = output_dir / "audio.mp3"
+                audio_out = output_dir / f"{_tp}audio.mp3"
                 # 重编码（libmp3lame）以兼容 wav+mp3 混合输入；-c copy 在此会失败。
                 res = await asyncio.to_thread(
                     subprocess.run,
@@ -1350,8 +1614,12 @@ class PipelineEngine:
                     capture_output=True, text=True, timeout=120,
                 )
                 if res.returncode == 0 and audio_out.exists():
-                    audio_url = f"{settings.server_public_url}/outputs/task_{task.id}/audio.mp3"
-                    task.audio_url = audio_url
+                    # 主档（tier=""）保持原 URL 路径；非主档用 tier_{T}_audio.mp3
+                    audio_url = (
+                        f"{settings.server_public_url}/outputs/task_{task.id}/{audio_out.name}"
+                    )
+                    if tier == "":
+                        task.audio_url = audio_url
                 else:
                     logger.warning(
                         "合并旁白音频失败(rc=%s): %s",
@@ -1362,7 +1630,10 @@ class PipelineEngine:
         return {"success": True, "segments": segments, "audio_url": audio_url,
                 "total_duration": round(total, 2)}
     
-    async def _download_storyboard_images(self, task: "Task", output_dir: Path) -> list:
+    async def _download_storyboard_images(
+        self, task: "Task", output_dir: Path,
+        tier: str = "", urls: list | None = None,
+    ) -> list:
         """确保分镜图在本地 output_dir 可用，返回本地路径列表（失败跳过并显式报错）。
 
         2026-09-13 根因修复（change-id=image-local-persist + composite-local-cache）：
@@ -1372,25 +1643,35 @@ class PipelineEngine:
           png，与 ``_build_segments`` 命名 ``img_{i}.png`` / ``img_{i}_wm.png`` 一致；
           旧实现按 ctype 存 jpg/webp 会与合成的 .png 查找错位）。
         - 失败：记 ``ERROR``（含 URL + 原因），跳过该张而非静默丢弃，调用方据此 fail-loud。
+
+        tier / urls 参数（选项 A 逐档）：非主档图片以 ``tier_{T}_`` 前缀隔离命名，避免
+        S/L 两档互写；``urls`` 显式给出某档自己的图片 URL 列表（不传则回退
+        ``task.image_urls``，即主档兼容行为）。主档（tier=""）命名保持旧形态。
         """
-        raw_urls = getattr(task, "image_urls", None)
-        raw_lp = getattr(task, "image_local_paths", None)
+        _ip = f"tier_{tier}_" if tier else ""
+        if urls is not None:
+            raw_urls = json.dumps(urls, ensure_ascii=False) if isinstance(urls, list) else urls
+        else:
+            raw_urls = getattr(task, "image_urls", None)
+        # 本地路径复用仅对主档成立：非主档的本地路径由 _persist_images_local 落盘，
+        # 其路径不落在 task.image_local_paths（那是主档兼容字段）。
+        raw_lp = getattr(task, "image_local_paths", None) if urls is None else None
         try:
-            urls = json.loads(raw_urls) if raw_urls else []
+            urls_list = json.loads(raw_urls) if raw_urls else []
         except Exception:
-            urls = []
+            urls_list = []
         try:
             lps = json.loads(raw_lp) if raw_lp else []
         except Exception:
             lps = []
-        if not isinstance(urls, list):
-            urls = []
+        if not isinstance(urls_list, list):
+            urls_list = []
         if not isinstance(lps, list):
             lps = []
         local = []
-        n = max(len(urls), len(lps))
+        n = max(len(urls_list), len(lps))
         for i in range(n):
-            u = urls[i] if i < len(urls) else None
+            u = urls_list[i] if i < len(urls_list) else None
             lp = lps[i] if i < len(lps) else None
             # 1) 本地落盘优先（image_local_paths 应为本地路径，误存 http 则忽略）
             if lp and not str(lp).startswith("http"):
@@ -1403,7 +1684,7 @@ class PipelineEngine:
                 if u:
                     logger.warning(f"分镜图来源既非本地也非 http，跳过 [{u}]")
                 continue
-            dst = output_dir / f"img_{i}.png"
+            dst = output_dir / f"{_ip}img_{i}.png"
             try:
                 async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                     resp = await client.get(u)
@@ -1412,7 +1693,7 @@ class PipelineEngine:
                 if dst.stat().st_size > 0:
                     # 文字水印：视频与分镜图统一标识（防搬运/品牌）
                     if settings.watermark_enabled and settings.watermark_text:
-                        wm = output_dir / f"img_{i}_wm.png"
+                        wm = output_dir / f"{_ip}img_{i}_wm.png"
                         if await self._apply_image_watermark(settings.ffmpeg_path, dst, wm):
                             local.append(str(wm))
                             continue
@@ -1421,16 +1702,20 @@ class PipelineEngine:
                     logger.error(f"分镜图下载内容为空，跳过 [{u}]")
             except Exception as e:
                 logger.error(f"分镜图下载失败 [{u}]: {e}")
-        logger.info(f"分镜图可用 {len(local)}/{n}")
+        logger.info(f"分镜图可用 {len(local)}/{n} (tier={tier or '主档'})")
         return local
 
-    async def _persist_images_local(self, task: "Task", image_urls: list) -> list:
-        """image 阶段把分镜图下载到本地 ``data/output/task_{id}/img_{i}.png``，返回本地
-        路径列表（best-effort）。
+    async def _persist_images_local(self, task: "Task", image_urls: list, tier: str = "") -> list:
+        """image 阶段把分镜图下载到本地 ``data/output/task_{id}/[tier_{T}_]img_{i}.png``，
+        返回本地路径列表（best-effort）。
 
         2026-09-13 根因修复（change-id=image-local-persist）：让成片渲染不再依赖 agnes
         CDN 实时可达。落盘失败不阻断 image 阶段——合成阶段仍可从 ``image_urls`` 回退下载。
+
+        tier 参数（选项 A 逐档）：非主档图片加 tier_{T}_ 前缀隔离（如 tier_L_img_{i}.png），
+        避免 S/L 两档的图片文件互相覆盖；主档（tier=""）保持旧命名 img_{i}.png。
         """
+        _ip = f"tier_{tier}_" if tier else ""
         if not isinstance(image_urls, list):
             return []
         out = Path(settings.output_dir) / f"task_{task.id}"
@@ -1441,7 +1726,7 @@ class PipelineEngine:
                 if u and Path(u).exists():
                     local.append(str(u))
                 continue
-            dst = out / f"img_{i}.png"
+            dst = out / f"{_ip}img_{i}.png"
             try:
                 async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                     resp = await client.get(u)
@@ -1451,7 +1736,7 @@ class PipelineEngine:
                     local.append(str(dst))
             except Exception as e:
                 logger.warning(f"image 阶段落盘失败 [{u}]: {e}")
-        logger.info(f"task{task.id} 分镜图落盘 {len(local)}/{len(image_urls)}")
+        logger.info(f"task{task.id} 分镜图落盘 {len(local)}/{len(image_urls)} (tier={tier or '主档'})")
         return local
 
     async def _probe_image_height(self, path) -> int | None:
@@ -1500,11 +1785,17 @@ class PipelineEngine:
 
     async def _build_segments(
         self, task: Task, storyboard: list[dict], tts_segments: dict,
-        W: int, H: int, platform: str = "douyin"
+        W: int, H: int, platform: str = "douyin",
+        tier: str = "", image_urls: list | None = None,
     ) -> dict:
         """逐镜以图定音：每镜 {img_i + narration_i.mp3} 合成 seg_{platform}_i.mp4（-shortest 严格贴合旁白时长，
         轻微 Ken Burns 推镜），再 concat 为 base_{platform}.mp4。总时长 = Σ旁白时长，天然精准，无 xfade 截断。
         seg/base 加平台前缀确保多平台独立分辨率不串用。
+
+        tier / image_urls（选项 A 逐档）：本档产物统一加 ``tier_{T}_`` 前缀
+        （``tier_L_img_{i}.png`` / ``tier_L_seg_{platform}_{i}.mp4`` /
+        ``tier_L_base_{platform}.mp4``），并只在本档自己的图片 URL 里找图，避免
+        S/L 两档共用一份图导致镜头数错位（L 18 镜 vs S 7 镜配对失败）。
 
         Returns: {"ok": bool, "base": str, "timeline":[(start,end,text)], "duration": float}
         """
@@ -1512,9 +1803,13 @@ class PipelineEngine:
             ff = settings.ffmpeg_path
             output_dir = Path(settings.output_dir) / f"task_{task.id}"
             output_dir.mkdir(parents=True, exist_ok=True)
+            # 逐档前缀：主档（tier=""）保持旧命名，非主档加 tier_{T}_ 隔离。
+            _tp = f"tier_{tier}_" if tier else ""
             # best-effort：CDN 不可达时本函数会跳过并显式报错（fail-loud）；
             # 合成仍以磁盘 img_*.png 为准（见下方按镜序配对，自愈于本地落盘图）。
-            await self._download_storyboard_images(task, output_dir)
+            await self._download_storyboard_images(
+                task, output_dir, tier=tier, urls=image_urls
+            )
 
             segs = tts_segments.get("segments", [])
 
@@ -1523,14 +1818,14 @@ class PipelineEngine:
                 （兼容历史 jpg/webp 命名）。2026-09-13 修复（subtitle-image-align）：
                 合成以磁盘 img_*.png 为准、自愈于本地落盘图，彻底摆脱对 agnes CDN 实时
                 可达性的依赖，且不再因旧分段 index/命名错位而 0 出片。"""
-                wm = output_dir / f"img_{j}_wm.png"
+                wm = output_dir / f"{_tp}img_{j}_wm.png"
                 if wm.exists():
                     return wm
-                base = output_dir / f"img_{j}.png"
+                base = output_dir / f"{_tp}img_{j}.png"
                 if base.exists():
                     return base
                 for suf in (".jpg", ".jpeg", ".webp"):
-                    cand = output_dir / f"img_{j}{suf}"
+                    cand = output_dir / f"{_tp}img_{j}{suf}"
                     if cand.exists():
                         return cand
                 return None
@@ -1560,7 +1855,7 @@ class PipelineEngine:
                 _adur = await self._probe_duration(str(aud))
                 dur = _adur or (s.get("duration") or 3.0)
                 dur = max(float(dur), 1.0)
-                seg = output_dir / f"seg_{platform}_{s['index']}.mp4"
+                seg = output_dir / f"{_tp}seg_{platform}_{s['index']}.mp4"
                 # 内存安全的 Ken Burns：把图放大到 1.12x，再用 crop 的 time 表达式
                 # 做缓慢平移（sin/cos 漂移）。不依赖 zoompan —— zoompan 在 d=1 时只输出
                 # 1 帧导致视频流提前 EOF，在长时长/低内存机器上又会缓冲全部帧而 OOM。
@@ -1607,7 +1902,7 @@ class PipelineEngine:
             durs = [max(0.04, round(d * FPS) / FPS) for d in durs]
             # 字幕时间轴 + 总时长：是否含镜间转场决定偏移
             trans = float(settings.transition_duration) if settings.transition_enabled else 0.0
-            base = output_dir / f"base_{platform}.mp4"
+            base = output_dir / f"{_tp}base_{platform}.mp4"
             n = len(seg_files)
             if trans > 0 and n > 1:
                 # 约束：过渡时长不得超过最短片段的 40%，否则 xfade offset 非法
@@ -1680,7 +1975,9 @@ class PipelineEngine:
 
     async def _concat_copy(self, ff: str, seg_files: list, base: Path) -> bool:
         """硬切拼接（concat demuxer -c copy，最快，但无过渡）。"""
-        listf = base.parent / "seg_list.txt"
+        # list 文件按 base 名派生，保证逐档/多平台并发拼接时互不覆盖
+        # （旧版固定 seg_list.txt，S/L 两档或两个平台同时拼会读到对方清单）。
+        listf = base.parent / f"seg_list_{base.stem}.txt"
         listf.write_text("\n".join(f"file '{p.replace(chr(92), '/')}'"
                                    for p in seg_files), encoding="utf-8")
         res = await asyncio.to_thread(
@@ -2128,23 +2425,32 @@ class PipelineEngine:
         W: int = 1080, H: int = 1350,
         platform: str = "douyin",
         poem_content: str | None = None,
+        tier_script: str | None = None,
+        tier: str = "",
     ) -> str:
         """烧录分段字幕 + 混入场景 BGM，产出 final_{platform}.mp4（多平台）或 final.mp4。
 
         视频基底 = 逐镜 seg 合成的 base_{platform}.mp4（已含旁白音轨）。
         彻底弃用 agnes source.mp4 音轨：画面与旁白均来自逐镜以图定音的结果；
         BGM 按 style 选古风曲低音量铺底。字幕预设/字号随平台分辨率(W,H)缩放。
+
+        tier（选项 A 逐档）：非主档产物加 ``tier_{T}_`` 前缀（``tier_L_final_x.mp4`` /
+        ``tier_L_subtitle_x.srt``），且**不**回写 ``task.subtitle_url``/``video_duration``
+        ——那两个是主档兼容字段，逐档渲染时若各档都写，最后渲染的档会覆盖主档。
         """
         try:
+            # 逐档前缀 + 产物命名（final/srt 均按档+平台派生，杜绝并发覆盖）
+            _tp = f"tier_{tier}_" if tier else ""
+            is_main_tier = tier == ""
             output_dir = Path(settings.output_dir) / f"task_{task.id}"
             base = Path(base_path)
             if not base.exists() or base.stat().st_size == 0:
-                logger.error("base.mp4 不存在，无法烧录")
-                return task.video_url or ""
+                logger.error(f"base.mp4 不存在，无法烧录 (tier={tier or '主档'})")
+                return (task.video_url or "") if is_main_tier else ""
             # 多平台模式：非默认平台用 final_{platform}.mp4 避免覆盖
             suffix = f"_{platform}" if platform != "douyin" else ""
-            final_path = output_dir / f"final{suffix}.mp4"
-            srt_path = output_dir / "subtitle.srt"
+            final_path = output_dir / f"{_tp}final{suffix}.mp4"
+            srt_path = output_dir / f"{_tp}subtitle{suffix}.srt"
             timeline = segs.get("timeline") or []
             if not timeline:
                 t = 0.0
@@ -2163,7 +2469,7 @@ class PipelineEngine:
             # 原诗整句（poem_content 传入时并入——白话段旁白不带引号念出原诗也命中）；
             # 命中金句的 cue 在 _split_timeline 按 golden_subtitle_weight 放大停留。
             golden_lines = self._extract_golden_from_script(
-                getattr(task, "script", "") or "", poem_content)
+                tier_script if tier_script is not None else (getattr(task, "script", "") or ""), poem_content)
             gweight = float(getattr(settings, "golden_subtitle_weight", 1.4) or 0.0)
             # video-comm 决策 5：末镜静音定格秒数（0=关闭，命令与旧版完全一致）
             hold = float(getattr(settings, "end_hold_duration", 2.0) or 0.0)
@@ -2293,18 +2599,20 @@ class PipelineEngine:
                                               text=True, timeout=600)
             if result.returncode != 0 or not final_path.exists() or final_path.stat().st_size == 0:
                 logger.error(f"FFmpeg 失败: {result.stderr[-500:]}")
-                return task.video_url or ""
-            final_url = f"{settings.server_public_url}/outputs/task_{task.id}/final{suffix}.mp4"
-            task.subtitle_url = final_url
-            try:
-                task.video_duration = round(out_total, 1)
-            except Exception as exc:
-                logger.warning("计算成片时长失败: %s", exc)
+                return (task.video_url or "") if is_main_tier else ""
+            final_url = f"{settings.server_public_url}/outputs/task_{task.id}/{final_path.name}"
+            # 仅主档回写兼容字段（多档渲染时由调用方以主平台成片为准统一回写）
+            if is_main_tier:
+                task.subtitle_url = final_url
+                try:
+                    task.video_duration = round(out_total, 1)
+                except Exception as exc:
+                    logger.warning("计算成片时长失败: %s", exc)
             logger.info(f"字幕烧录完成: {final_url} (时长 {out_total:.1f}s, bgm={bool(bgm)})")
             return final_url
         except Exception as e:
             logger.error(f"字幕烧录异常: {e}")
-            return task.video_url or ""
+            return (task.video_url or "") if tier == "" else ""
     
     def _extract_clean_text(self, script_text: str) -> str:
         """从脚本中提取「配音/旁白」正文，供 TTS 与字幕使用。

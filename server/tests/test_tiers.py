@@ -12,7 +12,7 @@ import re
 
 from app.config import (
     TIER_PROFILES, PLATFORM_TIER, tier_of, tier_profile,
-    tier_script_guidelines, resolve_task_tier, settings,
+    tier_script_guidelines, resolve_task_tier, resolve_task_tiers, settings,
 )
 from app.services.pipeline import PLATFORM_CONFIG
 from app.services.critic import CRITIC_SYSTEM_PROMPT, CREATOR_SYSTEM_PROMPT
@@ -169,6 +169,40 @@ class TestTaskTierResolve:
         assert resolve_task_tier(None) == "L"
         monkeypatch.setattr(settings, "output_platforms", [])
         assert resolve_task_tier(None) == "S"  # 空配置兜底 douyin → S
+
+
+class TestTaskTiersResolve:
+    """选项 A：任务级档位集合解析（resolve_task_tiers，供逐档生成）。
+
+    与 resolve_task_tier（混合收敛 S）不同——本函数返回去重档位集合，
+    混合任务应同时含 S、L，供 pipeline 逐档独立生成 script+storyboard。
+    """
+
+    def test_pure_s(self):
+        assert resolve_task_tiers(["douyin", "kuaishou", "xiaohongshu"]) == {"S"}
+
+    def test_pure_l(self):
+        assert resolve_task_tiers(["bilibili", "youtube"]) == {"L"}
+
+    def test_mixed_returns_both(self):
+        # 混合不再收敛到单一档，返回集合 {S, L}
+        assert resolve_task_tiers(["douyin", "bilibili"]) == {"S", "L"}
+        assert resolve_task_tiers(["xiaohongshu", "youtube", "kuaishou"]) == {"S", "L"}
+
+    def test_unknown_falls_back_s(self):
+        assert resolve_task_tiers(["weibo"]) == {"S"}  # 未知平台兜底 S
+
+    def test_none_falls_back_to_output_platforms(self, monkeypatch):
+        # 空平台 → settings.output_platforms 的档位集合
+        monkeypatch.setattr(settings, "output_platforms",
+                            ["douyin", "xiaohongshu", "kuaishou", "bilibili"])
+        assert resolve_task_tiers(None) == {"S", "L"}
+        monkeypatch.setattr(settings, "output_platforms", ["douyin"])
+        assert resolve_task_tiers(None) == {"S"}
+        monkeypatch.setattr(settings, "output_platforms", ["bilibili", "youtube"])
+        assert resolve_task_tiers(None) == {"L"}
+        monkeypatch.setattr(settings, "output_platforms", [])
+        assert resolve_task_tiers(None) == {"S"}  # 空配置兜底 douyin → S
 
 
 class TestStoryboardBudget:

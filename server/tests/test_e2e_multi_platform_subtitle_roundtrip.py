@@ -63,26 +63,35 @@ async def seeded(env):
 
 
 def _patch_render(monkeypatch, build_ok=True, burn_fail=()):
-    """mock TTS / _build_segments / _burn_subtitles，记录调用轨迹。"""
-    calls = {"build": [], "burn": []}
+    """mock TTS / 图片落盘 / _build_segments / _burn_subtitles，记录调用轨迹。
 
-    async def fake_tts(task, storyboard, db, force=False):
+    渲染层已逐档化（选项 A）：fake 需接受 tier/image_urls/tier_script 等逐档参数。
+    """
+    calls = {"build": [], "burn": [], "tts": []}
+
+    async def fake_tts(task, storyboard, db=None, force=False, tier=""):
+        calls["tts"].append(tier)
         return {"success": True, "segments": [{"text": "x", "audio": "y", "duration": 1.0}]}
 
-    async def fake_build(task, sb, tts, W, H, platform="douyin"):
+    async def fake_persist(task, image_urls, tier=""):
+        return []
+
+    async def fake_build(task, sb, tts, W, H, platform="douyin", tier="", image_urls=None):
         calls["build"].append(platform)
         if not build_ok:
             return {"ok": False}
         return {"ok": True, "base": f"base_{platform}.mp4",
                 "timeline": [(0, 1, "x")], "duration": 1.0}
 
-    async def fake_burn(task, base, sb, segs, W, H, platform="douyin", poem_content=None):
+    async def fake_burn(task, base, sb, segs, W, H, platform="douyin",
+                        poem_content=None, tier_script=None, tier=""):
         calls["burn"].append(platform)
         if platform in burn_fail:
             return None
         return f"http://x/outputs/task_1/final_{platform}.mp4"
 
     monkeypatch.setattr(pipeline_engine, "_generate_tts_segments", fake_tts)
+    monkeypatch.setattr(pipeline_engine, "_persist_images_local", fake_persist)
     monkeypatch.setattr(pipeline_engine, "_build_segments", fake_build)
     monkeypatch.setattr(pipeline_engine, "_burn_subtitles", fake_burn)
     return calls
