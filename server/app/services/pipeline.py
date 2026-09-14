@@ -391,12 +391,30 @@ class PipelineEngine:
                 return
             if not sb_map:
                 raise RuntimeError("image 缺少前置 storyboard")
+            # fail-loud 前置校验（2026-09-14 change-id=image-stage-storyboard-required）。
+            # 旧实现在档位无分镜时 `logger.warning + continue`，该档被静默跳过、Job 仍以
+            # **done** 收尾，而 task.image_urls/image_local_paths 始终为空。而
+            # _task_produced()['image'] 要求"CDN URL + 本地落盘都非空"（queue.py）⇒ 恒判
+            # "image 未产出" ⇒ subtitle 的 _deps_satisfied 永不满足 ⇒ _heal_prereqs 每轮
+            # 轮询补建一条 image Job ⇒ **无界自愈死循环**（与 tts 那次同构，只是换到 image
+            # 阶段；2026-09-14 起 subtitle 前置已含 image，见
+            # change-id=subtitle-image-prereq）。无分镜的档位不可能产出图片，阶段无法
+            # 真正完成 ⇒ 直接抛错让 Job 落 failed、任务干净落终态且原因可见。
+            missing_tiers = [
+                t for t in sorted(sb_map)
+                if not (sb_map[t].get("storyboard") or [])
+            ]
+            if missing_tiers:
+                task.status = "failed"
+                task.error_message = (
+                    "image 缺少分镜（档位 %s 无 storyboard）：上游 script/storyboard "
+                    "缺失，无法生图" % ",".join(missing_tiers)
+                )
+                await db.commit()
+                raise RuntimeError(task.error_message)
             for tier in sorted(sb_map.keys()):
                 entry = sb_map[tier]
                 storyboard = entry.get("storyboard") or []
-                if not storyboard:
-                    logger.warning(f"task{task_id} 档位 {tier} 无分镜，跳过该档生图")
-                    continue
                 label = "" if tier == main_tier else tier
                 image_urls = await self._generate_images(
                     task, storyboard, db,
@@ -643,12 +661,21 @@ class PipelineEngine:
             main_tier = self._main_tier(task)
             tier_sb_map = self._tier_storyboards(task)
             tier_image_urls: dict[str, list] = {}
+            _missing_tiers = [
+                t for t in sorted(tier_sb_map)
+                if not (tier_sb_map[t].get("storyboard") or [])
+            ]
+            if _missing_tiers:
+                # fail-loud（同 run_stage.image，change-id=image-stage-storyboard-required）：
+                # 旧实现 `warning + continue` 让该档静默跳过、最终仍按"成功"推进，而
+                # image 产物始终为空 ⇒ 下游（subtitle 前置含 image）永久得不到满足。
+                raise RuntimeError(
+                    "image 缺少分镜（档位 %s 无 storyboard）：上游 script/storyboard "
+                    "缺失，无法生图" % ",".join(_missing_tiers)
+                )
             for _tier in sorted(tier_sb_map.keys()):
                 _entry = tier_sb_map[_tier]
                 _sb = _entry.get("storyboard") or []
-                if not _sb:
-                    logger.warning(f"task{task_id} 档位 {_tier} 无分镜，跳过该档生图")
-                    continue
                 _label = "" if _tier == main_tier else _tier
                 _urls = await self._generate_images(
                     task, _sb, db,
