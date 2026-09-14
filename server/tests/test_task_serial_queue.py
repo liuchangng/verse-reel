@@ -104,8 +104,12 @@ async def test_cross_resource_parallel_across_tasks(queue_env):
     image（image 桶）可同轮同时认领（旧版会被"任务间串行"锁死）。"""
     svc, factory = queue_env
     await _mk_task(factory, 1)
-    # task2 前置已产出（script + 定妆照），使 image 依赖满足
-    await _mk_task(factory, 2, script="文案", character_ref="https://x/ref.png")
+    # task2 前置已产出（script 文案 + 分镜 + 定妆照），使 image 依赖满足
+    # 注：script 就绪的判据 =「文案 + 分镜」（2026-09-14
+    # change-id=script-produce-needs-storyboard），只给文案会被判未产出。
+    await _mk_task(factory, 2, script="文案",
+                   storyboard='[{"time": "0-3s", "narration": "床前明月光"}]',
+                   character_ref="https://x/ref.png")
     await _mk_job(factory, 1, "script")
     await _mk_job(factory, 2, "image")
 
@@ -200,6 +204,10 @@ async def test_prereq_running_blocks_downstream_even_with_product(queue_env):
     async with factory() as s:
         t = await s.get(Task, 1)
         t.script = "文案正文「金句」。"
+        # 注：tts 的 script 前置判据 =「文案 + 分镜」（2026-09-14
+        # change-id=script-produce-needs-storyboard），故一并给分镜；
+        # 只给文案时 script 判未产出，反而连前置都挡住（更能防抢跑）。
+        t.storyboard = '[{"time": "0-3s", "narration": "床前明月光"}]'
         await s.commit()
     await _mk_job(factory, 1, "script", status="running")
     await _mk_job(factory, 1, "tts")

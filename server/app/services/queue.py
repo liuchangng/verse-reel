@@ -345,8 +345,19 @@ def _task_produced(task: Task) -> dict[str, bool]:
         return bool(v)
 
     return {
-        # script: 字符串正文；空字符串/默认占位符视为未生成
-        "script": _nonempty(task.script),
+        # script 就绪 = 文案正文 **且** 分镜就绪（2026-09-14 修复，
+        # change-id=script-produce-needs-storyboard）。
+        # 旧判据只看 task.script 非空，而 _generate_script 恒落库文案、仅在主档评分
+        # 通过时才写分镜 ⇒「文案评分未达标」的任务被误判为 script 已产出，下游
+        # character/image/tts/subtitle 的 _deps_satisfied 一路放行，白跑若干阶段
+        # （无效生图 / 无效 TTS）直到 tts(image) 因缺分镜才兜底失败。下游真正需要的
+        # 前置是"文案 + 分镜"，故此判据必须与之一致；修正后这类任务会在最短路径上
+        # 由「script 前置已 failed」触发 _cascade_fail_pending，干净落终态。
+        "script": _nonempty(task.script)
+        and (
+            _nonempty(getattr(task, "storyboards_json", None))
+            or _nonempty(getattr(task, "storyboard", None))
+        ),
         # character: 定妆照锚点
         "character": _nonempty(getattr(task, "character_ref", None)),
     # image: 分镜图就绪 = CDN URL + 本地落盘都到位。2026-09-13 修复（t56 并发竞态）：

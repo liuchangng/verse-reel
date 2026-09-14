@@ -126,7 +126,12 @@ async def test_enqueue_preserves_terminal_jobs_as_history(env, monkeypatch):
     svc = QueueService()
     # 产物现状：script/character/tts 已有，image/video/subtitle 缺失
     # → 重新生成 ['video','subtitle'] 时 expand 只补 [image, video, subtitle]
-    await _mk_task(env, 1, script="文案正文", character_ref="http://img/char.png",
+    # 注：script 就绪的判据是「文案 + 分镜」（2026-09-14
+    # change-id=script-produce-needs-storyboard），故此处必须同时给 storyboard，
+    # 否则 script 会被判未产出而一并补建。
+    await _mk_task(env, 1, script="文案正文",
+                   storyboard=json.dumps([{"time": "0-3s", "narration": "床前明月光"}]),
+                   character_ref="http://img/char.png",
                    audio_url="http://a.mp3")
     failed_id = await _mk_job(env, 1, "video", status="failed", attempts=3,
                               attempts_log=json.dumps([{"attempt": 1, "ok": False}]))
