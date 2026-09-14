@@ -172,7 +172,15 @@ STAGE_PREREQS = {
     "image": {"script", "character"},
     "tts": {"script"},
     "video": {"image"},
-    "subtitle": {"video", "tts"},
+    # subtitle 阶段本体 = 「分镜图 + 旁白 → 合成成片」(_render_platform_outputs)，
+    # 因此**必须**依赖 image。2026-09-14 修复（change-id=subtitle-image-prereq）：
+    # 旧值仅 {"video","tts"}，而 enable_agnes_video=False（config.py 默认）时 video
+    # 阶段被 _stage_enabled 过滤掉 ⇒ subtitle 有效前置只剩 {tts} ⇒ image 不在前置链
+    # 上。于是 subtitle 与 image 并发竞态：分镜图尚未落盘就被认领，报
+    # 「逐镜合成无可用的(图,音频)对: 分镜图本地可用 0/N」，3 次重试用尽永久失败
+    # （实测 75 条课标任务中 task3/4/5/6/7 接连中招；task1 仅因 image 先跑完而侥幸成功）。
+    # image 恒列为前置：video 启用时它是 video 的前置（冗余但无害），禁用时直接兜住。
+    "subtitle": {"image", "video", "tts"},
     "publish_copy": {"script"},
 }
 
