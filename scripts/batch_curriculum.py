@@ -9,6 +9,10 @@
 - 不主动发布：用户人工发；脚本只建任务 + 进生成队列。
 - 分批控制：默认每批 10 个任务，批间 sleep 避免流水线爆满（视频 1次/分钟限速）。
 
+修复记录（2026-09-14）：``platforms`` 必须以 list 传参。旧版 ``",".join(PLATFORMS)``
+被后端解析成单元素 ``["douyin,bilibili"]``，落库畸形并污染产物文件名为
+``seg_douyin,bilibili_*.mp4`` 等。详见 ``build_create_params`` 的根因注释。
+
 用法（先起好后端，APP_TOKEN 与 .env 一致）：
   python scripts/batch_curriculum.py [--batch 10] [--dry-run] [--resume]
 
@@ -20,7 +24,6 @@
 import argparse
 import asyncio
 import json
-import time
 from pathlib import Path
 
 import httpx
@@ -37,9 +40,43 @@ def source_tag(no: int, title: str) -> str:
     return f"curriculum:primary:{no}"
 
 
-def create_tasks(client: httpx.AsyncClient, token: str, items: list[dict], batch: int, dry_run: bool) -> int:
-    """同步逻辑包在 async 里（httpx 异步），逐批建任务。返回成功数。"""
-    ...
+def build_create_params(item: dict, style: str = "") -> dict:
+    """构造 ``POST /api/tasks`` 的查询参数（单一事实源 + 防逗号串回归守护）。
+
+    根因记录（2026-09-14，change-id=curriculum-platforms-param）
+    -----------------------------------------------------------
+    旧版此处用 ``platforms=",".join(PLATFORMS)`` 发送。后端签名是
+    ``platforms: list[str] = Query(None)``，收到单个 ``"douyin,bilibili"`` 时
+    解析为**单元素列表** ``["douyin,bilibili"]``——整串被当成「一个平台名」。
+    随后 ``create_task`` 落库：``platform='douyin,bilibili'``、
+    ``platforms='["douyin,bilibili"]'``（畸形）。
+
+    渲染阶段把 platform 直接拼进文件名，于是产出
+    ``seg_douyin,bilibili_0.mp4`` / ``base_douyin,bilibili.mp4`` /
+    ``final_douyin,bilibili.mp4``。批量建的 75 个课标任务全部中招
+    （守护测试见 ``server/tests/test_curriculum_batch_params.py``）。
+
+    正确做法：传 **list**，由 httpx 序列化为重复参数
+    （``platforms=douyin&platforms=bilibili``），FastAPI 方能解析为真实列表。
+    """
+    # 守护：平台名出现逗号即等价于「串里混了多平台」，必须 fail-loud 而非静默落库
+    bad = [p for p in PLATFORMS if not p or p.strip() != p or "," in p]
+    if bad:
+        raise ValueError(f"平台名非法（不得为空/含逗号/含首尾空白）: {bad!r}")
+
+    params = {
+        "poem_id": item["poem_id"],
+        # 主平台：仍显式传单平台名，保持日志/兼容语义可读。
+        # 注意 create_task 内部会用 platforms[0] 覆盖该值（douyin 即首元素，结果一致）。
+        "platform": PLATFORMS[0],
+        # 必须传 list，禁止 ",".join —— 见上方根因记录
+        "platforms": list(PLATFORMS),
+        "source_hotspot_title": source_tag(item["no"], item["title"]),
+    }
+    # 显式风格优先（--style）；不传则由后端按 curriculum 默认「历史解读」
+    if style:
+        params["style"] = style
+    return params
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -79,15 +116,7 @@ async def run(args: argparse.Namespace) -> None:
             if args.dry_run:
                 print(f"  [dry]  #{it['no']} {it['title']} → poem_id={it['poem_id']} platforms={PLATFORMS}")
                 continue
-            params = {
-                "poem_id": it["poem_id"],
-                "platform": PLATFORMS[0],
-                "platforms": ",".join(PLATFORMS),
-                "source_hotspot_title": tag,
-            }
-            # 显式风格优先（--style）；不传则由后端按 curriculum 默认「历史解读」
-            if args.style:
-                params["style"] = args.style
+            params = build_create_params(it, args.style)
             r = await client.post("/api/tasks/", params=params, headers=headers)
             if r.status_code == 200:
                 created += 1
