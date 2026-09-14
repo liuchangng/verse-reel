@@ -411,11 +411,28 @@ class PipelineEngine:
                 return
             if not sb_map:
                 raise RuntimeError("tts 缺少前置 storyboard")
+            # fail-loud 前置校验（2026-09-14 change-id=tts-fail-loud）：
+            # 旧实现在档位无分镜时 `logger.warning + continue`，于是该档被静默跳过、
+            # Job 仍以 done 收尾，但 task.audio_url 始终为空。而 _task_produced()['tts']
+            # 正是以 audio_url 非空为准（queue.py:316）⇒ 恒判"tts 未产出" ⇒ subtitle 的
+            # _deps_satisfied 永不满足 ⇒ queue._heal_prereqs 每轮轮询补建一条 tts Job
+            # ⇒ **无界自愈死循环**（防循环只覆盖"前置已 failed"，而空转 Job 是 done）。
+            # 触发条件极常见：文案评分未达标时 storyboards_json 不落库（pipeline:991），
+            # 而 _tier_storyboards 会回退成 {主档: {storyboard: []}}。实测 12 分钟内
+            # 自愈 358 次、单任务累积 394 条 tts Job（job 空转仅 14ms）。
+            # 空转"成功"不是成功：此处直接抛错让 Job 落 failed，下一次自愈即走
+            # queue._cascade_fail_pending 让任务干净落终态，循环终止且原因可见。
+            missing_tiers = [
+                t for t in sorted(sb_map)
+                if not (sb_map[t].get("storyboard") or [])
+            ]
+            if missing_tiers:
+                raise RuntimeError(
+                    "tts 缺少分镜（档位 %s 无 storyboard）：上游 script/storyboard "
+                    "缺失，无法生成旁白" % ",".join(missing_tiers)
+                )
             for tier in sorted(sb_map.keys()):
                 storyboard = sb_map[tier].get("storyboard") or []
-                if not storyboard:
-                    logger.warning(f"task{task_id} 档位 {tier} 无分镜，跳过该档 TTS")
-                    continue
                 label = "" if tier == main_tier else tier
                 tts_segments = await self._generate_tts_segments(
                     task, storyboard, db, force=force, tier=label
