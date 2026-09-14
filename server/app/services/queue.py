@@ -289,6 +289,48 @@ def _expand_prereqs(
     return [s for s in STAGE_ORDER if s in need]
 
 
+def _downstream_dependents(stage: str) -> list[str]:
+    """「该阶段 + 其全体**传递依赖者**」中当前已启用的阶段，按 STAGE_ORDER 排序。
+
+    为什么需要（2026-09-14 change-id=regen-downstream-chain）：
+        单阶段重跑 ``regenerate?stage=X`` 旧实现只入队 1 条 Job，但
+        (a) ``enqueue_task`` 会删除该任务**全部** pending/running Job（queue.py:457-459，
+            不区分阶段）；
+        (b) ``_expand_prereqs`` 只补**上游**前置、不补下游；
+        (c) ``_maybe_finalize`` 只在"已存在的 Job"上判定 ``all(done)``（queue.py:1052-1071）。
+        三者叠加 ⇒ 下游 Job 已不存在 ⇒ 任务被判 ``pending_review / progress=95``，
+        **却没有任何成片**（静默假完成）。而 ``run_stage.script`` 本身明确写着
+        "文案是全链源头，重跑即全链失效"（主动清空下游产物，见 pipeline.run_stage
+        的 character_ref/image_urls/audio_url/subtitle_url 清空块）—— 与"只入队
+        script 一条 Job"自相矛盾，故必须补下游。
+
+    为什么按**依赖闭包**而非 STAGE_ORDER 位置截断：
+        按位置截断会让 ``regenerate?stage=character`` 连带入队 tts 并清空其
+        ``audio_url``；但 tts 的前置是 script、与定妆照无关 ⇒ 用户会看到
+        "我只重生成定妆照，音频怎么也没了"。故只取**真正依赖**该阶段的阶段。
+
+    Returns:
+        含 ``stage`` 自身在内的阶段列表；``stage`` 不在 STAGE_ORDER、或其**自身
+        未启用**时原样返回 ``[stage]``（保持旧契约：由 ``enqueue_task`` 内的
+        ``_expand_prereqs`` 去裁剪，不由本函数替用户决定"换个阶段跑"）。
+    """
+    enabled = _enabled_stages()
+    if stage not in STAGE_ORDER or stage not in enabled:
+        return [stage]
+    affected = {stage}
+    changed = True
+    while changed:
+        changed = False
+        for st in STAGE_ORDER:
+            if st in affected:
+                continue
+            if STAGE_PREREQS.get(st, set()) & affected:
+                affected.add(st)
+                changed = True
+    enabled_set = set(enabled)
+    return [s for s in STAGE_ORDER if s in affected and s in enabled_set]
+
+
 def _task_produced(task: Task) -> dict[str, bool]:
     """判断 task 已经生成了哪些阶段的产物（用于幂等依赖判断 / D5 死锁修复）。
 

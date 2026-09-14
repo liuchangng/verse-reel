@@ -158,7 +158,10 @@ class TestRegenerateTask:
         assert task.progress == 0
         assert task.review_status == "pending"
         # 入队走 mock（若这里漏了 mock，就会真的给生产库任务1重跑一遍图片）
-        assert no_real_enqueue and no_real_enqueue[0]["stages"] == ["image"]
+        # 2026-09-14 change-id=regen-downstream-chain：单阶段重跑连带下游依赖者。
+        # image 的下游是 subtitle（STAGE_PREREQS["subtitle"] 含 image）；video 在
+        # enable_agnes_video=False 时被 _enabled_stages 过滤，故不在结果中。
+        assert no_real_enqueue and no_real_enqueue[0]["stages"] == ["image", "subtitle"]
         assert no_real_enqueue[0]["source"] == "regenerate"
 
     @pytest.mark.asyncio
@@ -168,4 +171,6 @@ class TestRegenerateTask:
         db = FakeDb(task)
         resp = await regenerate_task(1, stage="video", force=False, db=db)
         assert resp["status"] == "processing"
+        # video 阶段本体在 enable_agnes_video=False 时未启用，_downstream_dependents
+        # 对「自身未启用」的阶段原样返回 [stage]（不替用户换阶段跑），故仍为 ["video"]。
         assert no_real_enqueue[0]["stages"] == ["video"]

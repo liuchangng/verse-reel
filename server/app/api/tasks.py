@@ -14,7 +14,12 @@ from sqlalchemy import select, func
 from app.database import get_db, async_session_factory
 from app.models.task import Task
 from app.models.job import Job
-from app.services.queue import STAGE_ORDER, queue_service, _enabled_stages
+from app.services.queue import (
+    STAGE_ORDER,
+    queue_service,
+    _downstream_dependents,
+    _enabled_stages,
+)
 from app.models.poem import Poem
 from app.services.pipeline import pipeline_engine
 from app.services.prompt_optimizer import list_styles, normalize_style, DEFAULT_STYLE
@@ -700,9 +705,13 @@ async def regenerate_task(
     改造：旧版用 BackgroundTasks 直接调 ``run_pipeline``，**绕过队列**。
     新版入库：
     - ``stage=all``：入队全部 6 阶段，清空全部旧产物
-    - ``stage={script, character, image, tts, video, subtitle}``：入队单阶段，
-      只清空**该阶段自己的**产物字段（``STAGE_OUTPUTS``），其余阶段产物保留。
-      例：``stage=image`` 只清 ``image_urls/image_score``，保留文案与定妆照。
+    - ``stage={script, character, image, tts, video, subtitle}``：入队**该阶段
+      及其下游依赖者**（``_downstream_dependents``，按 STAGE_ORDER 排序），
+      只清空这些阶段自己的产物字段（``STAGE_OUTPUTS``），其余阶段产物保留。
+      例：``stage=image`` 入队 [image, subtitle] 并只清 ``image_urls/image_score``
+      与 ``subtitle_url/platform_outputs``，保留文案/定妆照/音频。
+      （2026-09-14 修复：旧实现只入队单阶段，会因下游 Job 缺失导致任务被判
+      完成却无成片，见 ``_downstream_dependents`` 文档。）
     - 依赖判定走 ``_task_produced`` 产物自检（D5 死锁修复），无需前置 Job
     - 兼容旧名：``storyboard`` → ``image``，``spot`` → ``script``
     """
@@ -739,10 +748,18 @@ async def regenerate_task(
         stages = list(_enabled_stages())
         clear_outputs = True
     elif stage in STAGE_ORDER:
-        stages = [stage]
-        # 单阶段重跑也必须清空该阶段自己的产物，否则 run_stage 的产物自检会直接
-        # 跳过，「重生成」变成空操作。清空范围由 STAGE_OUTPUTS 限定为当前阶段
-        # 字段（例：image 只清 image_urls/image_score，保留 script / character_ref）。
+        # 单阶段重跑必须连带该阶段的**下游依赖者**（2026-09-14
+        # change-id=regen-downstream-chain）。旧实现 stages=[stage] 只入队 1 条
+        # Job，而 enqueue_task 会删掉本任务全部 pending/running Job（不分阶段）、
+        # _expand_prereqs 只补上游 ⇒ 下游 Job 消失 ⇒ _maybe_finalize 在"已存在的
+        # Job"上判 all(done) ⇒ 任务被标 pending_review/95% 却没有任何成片。
+        # 例：stage=script 时 run_stage 会清空 character_ref/image_urls/audio_url/
+        # subtitle_url（"文案是全链源头，重跑即全链失效"），却只入队 script 一条，
+        # 自相矛盾。现按依赖闭包补下游（只补真正依赖该阶段的，避免误清无关阶段）。
+        stages = _downstream_dependents(stage)
+        # 单阶段重跑也必须清空这些阶段自己的产物，否则 run_stage 的产物自检会直接
+        # 跳过，「重生成」变成空操作。清空范围仍由 STAGE_OUTPUTS 限定为本次入队的
+        # 阶段字段（例：image 只清 image_urls/image_score，保留 script / character_ref）。
         clear_outputs = True
     else:
         raise HTTPException(
@@ -831,7 +848,10 @@ async def batch_generate(
     # 2) 逐任务入队（依赖补全 + 死锁自愈在队列内自动处理）
     results = []
     total_jobs = 0
-    stages_arg = list(_enabled_stages()) if stage == "all" else [stage]
+    stages_arg = (
+        list(_enabled_stages()) if stage == "all"
+        else _downstream_dependents(stage)   # 连带下游依赖者，见 _downstream_dependents
+    )
     for t in tasks:
         try:
             # 立即翻 processing + current_stage，前端实时可见（不必等队列 claim）
